@@ -77,4 +77,10 @@ extension Index {
             try w.addDocument(value)
         }
     }
+
+    /// Delete all documents matching `query`, then commit + reload so the change
+    /// is immediately searchable. See `IndexWriter.deleteDocuments(matching:)`.
+    public func delete(matching query: Query) throws {
+        try write { try $0.deleteDocuments(matching: query) }
+    }
 }

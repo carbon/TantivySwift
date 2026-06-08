@@ -100,7 +100,7 @@ public final class Index: @unchecked Sendable {
     ) throws(TantivyError) -> [SearchHit] {
         var err: UnsafeMutablePointer<CChar>?
         let csv = fields.joined(separator: ",")
-        let boostsJSON = Self.boostsJSON(boosts)
+        let boostsJSON = try Self.boostsJSON(boosts)
         let snipCSV = highlight.joined(separator: ",")
         let raw: UnsafeMutablePointer<CChar>? =
             query.withCString { qC in
@@ -126,7 +126,7 @@ public final class Index: @unchecked Sendable {
         _ query: Query, limit: Int = 10, highlight: [String] = [], snippetMaxChars: Int = 0
     ) throws(TantivyError) -> [SearchHit] {
         var err: UnsafeMutablePointer<CChar>?
-        let qjson = query.jsonString()
+        let qjson = try query.jsonString()
         let snipCSV = highlight.joined(separator: ",")
         let raw: UnsafeMutablePointer<CChar>? =
             qjson.withCString { qC in
@@ -139,11 +139,47 @@ public final class Index: @unchecked Sendable {
         return try Self.decodeHits(Data(bytes: raw, count: strlen(raw)))
     }
 
+    // MARK: - Counting
+
+    /// Number of documents matching `query` (tantivy query syntax) without
+    /// loading or transferring any documents — cheaper than `search(...).count`
+    /// for large result sets, and not capped by a `limit`.
+    public func count(
+        _ query: String, fields: [String] = [], boosts: [String: Double] = [:]
+    ) throws(TantivyError) -> Int {
+        var err: UnsafeMutablePointer<CChar>?
+        let csv = fields.joined(separator: ",")
+        let boostsJSON = try Self.boostsJSON(boosts)
+        let n = query.withCString { qC in
+            withOptionalCString(csv) { fC in
+                withOptionalCString(boostsJSON) { bC in
+                    tantivy_index_count(handle, qC, fC, bC, &err)
+                }
+            }
+        }
+        if n < 0 { throw TantivyError.take(&err, fallback: "count failed") }
+        return Int(n)
+    }
+
+    /// Number of documents matching a structured ``Query`` (no documents loaded).
+    public func count(_ query: Query) throws(TantivyError) -> Int {
+        var err: UnsafeMutablePointer<CChar>?
+        let qjson = try query.jsonString()
+        let n = qjson.withCString { tantivy_index_count_query(handle, $0, &err) }
+        if n < 0 { throw TantivyError.take(&err, fallback: "count failed") }
+        return Int(n)
+    }
+
     // MARK: - Result decoding
 
-    private static func boostsJSON(_ boosts: [String: Double]) -> String {
+    private static func boostsJSON(_ boosts: [String: Double]) throws(TantivyError) -> String {
         guard !boosts.isEmpty else { return "" }
-        let data = (try? JSONSerialization.data(withJSONObject: boosts)) ?? Data()
+        for (field, value) in boosts where !value.isFinite {
+            throw .encoding("non-finite boost for field '\(field)' (NaN/±∞)")
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: boosts) else {
+            throw .encoding("could not serialize boosts")
+        }
         return String(decoding: data, as: UTF8.self)
     }
 

@@ -133,6 +133,8 @@ let index = try Index.inMemory(schema: schema)      // not persisted
 index.documentCount                                 // searchable doc count
 try index.reload()                                  // observe latest commit
 try index.search(_:limit:fields:)                   // -> [SearchHit]
+try index.count("sea")                              // match count, no docs loaded
+try index.count(.range("year", 1900...2000))        // count a structured Query
 ```
 
 `Index(path:)` creates the index if the directory is empty, or opens the
@@ -148,8 +150,13 @@ try writer.addDocument(someEncodableValue)          // any Encodable
 try writer.addDocument(json: #"{"title":"Hi"}"#)    // raw JSON
 let opstamp = try writer.commit()                   // durable; reload to search
 try writer.commitAndReload()                         // commit + index.reload()
+try writer.rollback()                                // discard uncommitted ops
 try writer.deleteAllDocuments()
-try writer.deleteDocuments(field: "id", equals: "abc123")   // delete by term
+try writer.deleteDocuments(field: "id", equals: "abc123")            // delete by term
+try writer.deleteDocuments(field: "id", equalsAnyOf: ["a", "b"])     // multi-term delete
+try writer.deleteDocuments(matching: .range("year", 1900...1950))    // delete by query
+// or, with commit + reload in one step:
+try index.delete(matching: .term("status", "draft"))
 ```
 
 Use at most **one writer per index at a time**. Values may be scalars or arrays

@@ -165,10 +165,41 @@ extension Query {
         }
     }
 
-    /// The JSON tree handed to the FFI.
-    func jsonString() -> String {
-        let data = (try? JSONSerialization.data(withJSONObject: jsonObject()))
-            ?? Data(#"{"type":"all"}"#.utf8)
+    /// Reject any non-finite `Double`/`Float` (NaN / ±∞) in the tree.
+    /// `JSONSerialization` raises an *uncatchable* `NSException` on those, so we
+    /// must catch them here — otherwise a stray non-finite value crashes the
+    /// process, or (before this) silently degraded to a match-all query that
+    /// matched, or via `deleteDocuments(matching:)` *deleted*, every document.
+    private func validateFinite() throws(TantivyError) {
+        func finite(_ v: TermValue) -> Bool {
+            if case .double(let d) = v { return d.isFinite }
+            return true
+        }
+        switch self {
+        case .matchAll, .fuzzy, .phrase:
+            break
+        case .term(_, let value):
+            if !finite(value) { throw .encoding("non-finite number in term query") }
+        case .range(_, let lower, let upper):
+            if let l = lower, !finite(l.value) { throw .encoding("non-finite number in range bound") }
+            if let u = upper, !finite(u.value) { throw .encoding("non-finite number in range bound") }
+        case .boost(let query, let factor):
+            if !factor.isFinite { throw .encoding("non-finite boost factor") }
+            try query.validateFinite()
+        case .boolean(let must, let should, let mustNot, _):
+            for q in must { try q.validateFinite() }
+            for q in should { try q.validateFinite() }
+            for q in mustNot { try q.validateFinite() }
+        }
+    }
+
+    /// The JSON tree handed to the FFI. Validates finiteness first, then
+    /// serializes — never silently degrades to a match-all query.
+    func jsonString() throws(TantivyError) -> String {
+        try validateFinite()
+        guard let data = try? JSONSerialization.data(withJSONObject: jsonObject()) else {
+            throw TantivyError.encoding("could not serialize query")
+        }
         return String(decoding: data, as: UTF8.self)
     }
 }

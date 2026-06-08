@@ -21,7 +21,7 @@ use std::ptr;
 use std::ops::Bound;
 
 use serde_json::json;
-use tantivy::collector::TopDocs;
+use tantivy::collector::{Count, TopDocs};
 use tantivy::directory::MmapDirectory;
 use tantivy::query::{
     AllQuery, BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, QueryParser,
@@ -377,6 +377,20 @@ pub extern "C" fn tantivy_writer_commit(writer: *mut CWriter, out_error: *mut *m
     })
 }
 
+/// Roll back to the last commit, discarding every operation (add/delete) queued
+/// since. Returns the opstamp rolled back to, or -1 on error.
+#[no_mangle]
+pub extern "C" fn tantivy_writer_rollback(writer: *mut CWriter, out_error: *mut *mut c_char) -> i64 {
+    guard(out_error, -1, || {
+        let w = unsafe { writer.as_mut() }.ok_or("writer handle is null")?;
+        let opstamp = w
+            .writer
+            .rollback()
+            .map_err(|e| format!("rollback failed: {e}"))?;
+        Ok(opstamp as i64)
+    })
+}
+
 /// Delete every document in the index (takes effect on the next commit).
 /// Returns 0 on success, -1 on error.
 #[no_mangle]
@@ -462,6 +476,33 @@ pub extern "C" fn tantivy_writer_delete_term(
     })
 }
 
+/// Delete all documents matching a structured query (same JSON grammar as
+/// `tantivy_index_search_query`: all / term / fuzzy / phrase / range / boost /
+/// boolean). This is the query-based counterpart to `tantivy_writer_delete_term`
+/// — use it to delete by range, by several terms (a boolean `should`), etc.
+///
+/// Only affects documents from previous commits (or added earlier in the current
+/// commit). Takes effect on the next commit. Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn tantivy_writer_delete_query(
+    writer: *mut CWriter,
+    query_json: *const c_char,
+    out_error: *mut *mut c_char,
+) -> c_int {
+    guard(out_error, -1, || {
+        let w = unsafe { writer.as_ref() }.ok_or("writer handle is null")?;
+        let qjson = unsafe { opt_str(query_json) }.ok_or("query_json must be valid UTF-8")?;
+        let tree: serde_json::Value =
+            serde_json::from_str(qjson).map_err(|e| format!("invalid query JSON: {e}"))?;
+        let schema = w.writer.index().schema();
+        let query = build_query(&schema, &tree)?;
+        w.writer
+            .delete_query(query)
+            .map_err(|e| format!("delete_query failed: {e}"))?;
+        Ok(0)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Searching
 // ---------------------------------------------------------------------------
@@ -478,6 +519,54 @@ pub extern "C" fn tantivy_writer_delete_term(
 /// per-field weights (null/empty -> none).
 ///
 /// Returns a heap C string (free with `tantivy_string_free`), or null on error.
+/// Build a parsed query from tantivy's string query syntax, applying optional
+/// default fields and per-field boosts. Shared by search and count.
+fn parse_string_query(
+    idx: &CIndex,
+    query: &str,
+    default_fields_csv: Option<&str>,
+    boosts_json: Option<&str>,
+) -> Result<Box<dyn Query>, String> {
+    let fields: Vec<Field> = match default_fields_csv.map(str::trim).filter(|s| !s.is_empty()) {
+        None => default_text_fields(&idx.schema),
+        Some(csv) => {
+            let mut v = Vec::new();
+            for name in csv.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                let f = idx
+                    .schema
+                    .get_field(name)
+                    .map_err(|_| format!("unknown field in default fields: '{name}'"))?;
+                v.push(f);
+            }
+            v
+        }
+    };
+
+    let mut parser = QueryParser::for_index(&idx.index, fields);
+
+    // Apply optional per-field boosts.
+    if let Some(spec) = boosts_json.filter(|s| !s.is_empty()) {
+        let map: serde_json::Value =
+            serde_json::from_str(spec).map_err(|e| format!("invalid boosts JSON: {e}"))?;
+        if let Some(obj) = map.as_object() {
+            for (name, val) in obj {
+                let f = idx
+                    .schema
+                    .get_field(name)
+                    .map_err(|_| format!("unknown field in boosts: '{name}'"))?;
+                let boost = val
+                    .as_f64()
+                    .ok_or_else(|| format!("boost for '{name}' must be a number"))?;
+                parser.set_field_boost(f, boost as f32);
+            }
+        }
+    }
+
+    parser
+        .parse_query(query)
+        .map_err(|e| format!("could not parse query: {e}"))
+}
+
 #[no_mangle]
 pub extern "C" fn tantivy_index_search(
     index: *mut CIndex,
@@ -492,52 +581,43 @@ pub extern "C" fn tantivy_index_search(
     guard(out_error, ptr::null_mut(), || {
         let idx = unsafe { index.as_ref() }.ok_or("index handle is null")?;
         let query = unsafe { opt_str(query) }.ok_or("query must be valid UTF-8")?;
-
-        // Resolve default fields.
-        let fields: Vec<Field> = match unsafe { opt_str(default_fields_csv) }
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            None => default_text_fields(&idx.schema),
-            Some(csv) => {
-                let mut v = Vec::new();
-                for name in csv.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                    let f = idx
-                        .schema
-                        .get_field(name)
-                        .map_err(|_| format!("unknown field in default fields: '{name}'"))?;
-                    v.push(f);
-                }
-                v
-            }
-        };
-
-        let mut parser = QueryParser::for_index(&idx.index, fields);
-
-        // Apply optional per-field boosts.
-        if let Some(spec) = unsafe { opt_str(boosts_json) }.filter(|s| !s.is_empty()) {
-            let map: serde_json::Value =
-                serde_json::from_str(spec).map_err(|e| format!("invalid boosts JSON: {e}"))?;
-            if let Some(obj) = map.as_object() {
-                for (name, val) in obj {
-                    let f = idx
-                        .schema
-                        .get_field(name)
-                        .map_err(|_| format!("unknown field in boosts: '{name}'"))?;
-                    let boost = val
-                        .as_f64()
-                        .ok_or_else(|| format!("boost for '{name}' must be a number"))?;
-                    parser.set_field_boost(f, boost as f32);
-                }
-            }
-        }
-
-        let parsed = parser
-            .parse_query(query)
-            .map_err(|e| format!("could not parse query: {e}"))?;
-
+        let parsed = parse_string_query(
+            idx,
+            query,
+            unsafe { opt_str(default_fields_csv) },
+            unsafe { opt_str(boosts_json) },
+        )?;
         let snippet_fields = resolve_fields_csv(&idx.schema, unsafe { opt_str(snippet_fields_csv) })?;
         execute_search(idx, &*parsed, limit, &snippet_fields, snippet_max_chars)
+    })
+}
+
+/// Count documents matching a string query, without loading or transferring any
+/// documents. Same `default_fields_csv` / `boosts_json` semantics as
+/// `tantivy_index_search`. Returns the count, or -1 on error.
+#[no_mangle]
+pub extern "C" fn tantivy_index_count(
+    index: *mut CIndex,
+    query: *const c_char,
+    default_fields_csv: *const c_char,
+    boosts_json: *const c_char,
+    out_error: *mut *mut c_char,
+) -> i64 {
+    guard(out_error, -1, || {
+        let idx = unsafe { index.as_ref() }.ok_or("index handle is null")?;
+        let query = unsafe { opt_str(query) }.ok_or("query must be valid UTF-8")?;
+        let parsed = parse_string_query(
+            idx,
+            query,
+            unsafe { opt_str(default_fields_csv) },
+            unsafe { opt_str(boosts_json) },
+        )?;
+        let n = idx
+            .reader
+            .searcher()
+            .search(&*parsed, &Count)
+            .map_err(|e| format!("count failed: {e}"))?;
+        Ok(n as i64)
     })
 }
 
@@ -832,6 +912,30 @@ pub extern "C" fn tantivy_index_search_query(
 
         let snippet_fields = resolve_fields_csv(&idx.schema, unsafe { opt_str(snippet_fields_csv) })?;
         execute_search(idx, &*query, limit, &snippet_fields, snippet_max_chars)
+    })
+}
+
+/// Count documents matching a structured query (same JSON grammar as
+/// `tantivy_index_search_query`), without loading any documents. Returns the
+/// count, or -1 on error.
+#[no_mangle]
+pub extern "C" fn tantivy_index_count_query(
+    index: *mut CIndex,
+    query_json: *const c_char,
+    out_error: *mut *mut c_char,
+) -> i64 {
+    guard(out_error, -1, || {
+        let idx = unsafe { index.as_ref() }.ok_or("index handle is null")?;
+        let qjson = unsafe { opt_str(query_json) }.ok_or("query_json must be valid UTF-8")?;
+        let tree: serde_json::Value =
+            serde_json::from_str(qjson).map_err(|e| format!("invalid query JSON: {e}"))?;
+        let query = build_query(&idx.schema, &tree)?;
+        let n = idx
+            .reader
+            .searcher()
+            .search(&*query, &Count)
+            .map_err(|e| format!("count failed: {e}"))?;
+        Ok(n as i64)
     })
 }
 

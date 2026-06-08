@@ -41,6 +41,15 @@ extension DocumentValue {
         case .array(let values): return values.map { $0.jsonValue() }
         }
     }
+
+    /// False if this value (or any element) is a non-finite `Double` (NaN/±∞).
+    fileprivate var isFinite: Bool {
+        switch self {
+        case .double(let d): return d.isFinite
+        case .array(let values): return values.allSatisfy(\.isFinite)
+        default: return true
+        }
+    }
 }
 
 /// A document built with typed values, supporting `Date` and multi-valued fields
@@ -70,10 +79,17 @@ public struct Document: Sendable {
     /// Set a `Date` value (dates aren't expressible as a literal).
     public mutating func set(_ field: String, _ date: Date) { fields[field] = .date(date) }
 
-    /// The JSON object handed to the FFI (dates rendered as RFC3339).
-    func jsonString() -> String {
+    /// The JSON object handed to the FFI (dates rendered as RFC3339). Throws on a
+    /// non-finite number rather than letting `JSONSerialization` raise an
+    /// uncatchable `NSException`.
+    func jsonString() throws(TantivyError) -> String {
+        for (name, value) in fields where !value.isFinite {
+            throw TantivyError.encoding("field '\(name)' has a non-finite number (NaN/±∞)")
+        }
         let object = fields.mapValues { $0.jsonValue() }
-        let data = (try? JSONSerialization.data(withJSONObject: object)) ?? Data("{}".utf8)
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else {
+            throw TantivyError.encoding("could not serialize document")
+        }
         return String(decoding: data, as: UTF8.self)
     }
 }
