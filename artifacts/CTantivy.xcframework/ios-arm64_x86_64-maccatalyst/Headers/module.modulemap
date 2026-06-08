@@ -1,4 +1,0 @@
-module CTantivy {
-    header "ctantivy.h"
-    export *
-}

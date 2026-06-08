@@ -4,9 +4,9 @@ Swift bindings for the [tantivy](https://github.com/quickwit-oss/tantivy) **0.26
 full-text search engine, with a small, idiomatic API for building a schema,
 adding documents, and querying.
 
-Works on **macOS, iOS and iPadOS** (device + simulator). The Rust engine is
-shipped as a prebuilt static-library `XCFramework`; there is nothing to compile
-at app-build time.
+Works on **macOS, iOS and iPadOS** (device + simulator). The Rust engine ships as
+a prebuilt static-library `XCFramework`, downloaded from the GitHub Release and
+checksum-verified by SwiftPM; there is nothing to compile at app-build time.
 
 ```swift
 import Tantivy
@@ -43,8 +43,10 @@ for hit in try index.search("sea whale", limit: 10) {
 
 ## Installation (Swift Package Manager)
 
-The package vends `artifacts/CTantivy.xcframework` (a binary target), so building
-an app against it needs **no Rust toolchain** — just `import Tantivy`.
+The prebuilt `CTantivy.xcframework` is attached to each GitHub Release and
+referenced from `Package.swift` as a checksummed remote binary target, so SwiftPM
+downloads and verifies it on resolve. Building an app against it needs **no Rust
+toolchain and no Git LFS** — just `import Tantivy`.
 
 **From a Git remote** — in another package's `Package.swift`:
 
@@ -78,13 +80,14 @@ let index = try Index.inMemory(schema:
     SchemaBuilder().addTextField("title", stored: true).build())
 ```
 
-> **Consuming as a dependency requires the committed xcframework.** The
-> `artifacts/CTantivy.xcframework` binary must be present in the checkout (it is,
-> in this repo). When it exists, `Package.swift` links it as a clean binary
-> target with no `unsafeFlags`, which is what makes the package usable as a
-> dependency of other packages. The host-only fallback (used when the
-> xcframework is absent) relies on `unsafeFlags` and is for local development of
-> *this* package only. The xcframework is ~60 MB — consider **Git LFS** for it.
+> **How the binary is resolved.** `Package.swift` selects the C layer in three
+> modes, in priority order: (1) a locally-built `artifacts/CTantivy.xcframework`
+> if present (a release dry-run, or testing a fresh build); (2) else the host
+> static library from `scripts/build-host.sh` (local/CI development — this is the
+> only mode that uses `unsafeFlags`); (3) else, the default for consumers, the
+> checksummed xcframework **downloaded from the matching GitHub Release**. The
+> binary is no longer committed to the repo, so clones are small and there is no
+> Git LFS dependency.
 
 > Building **from source** (regenerating the xcframework) requires full Xcode +
 > a Rust toolchain — see [Building the XCFramework](#building-the-xcframework).
@@ -296,6 +299,23 @@ This cross-compiles the Rust static library for:
 
 and assembles them into `artifacts/CTantivy.xcframework`. iPadOS uses the iOS
 slices.
+
+### Cutting a release
+
+`scripts/release.sh <version>` automates a release end to end: it builds the
+xcframework, zips it, computes its checksum, pins `release` + `checksum` in
+`Package.swift` to the release asset, commits, and publishes the GitHub Release
+with the zip attached (the tag and asset are created together, so there is never
+a window where the pinned URL 404s). Run it from a clean `main`:
+
+```bash
+# Requires full Xcode, a Swift toolchain, and an authenticated `gh`.
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  scripts/release.sh 0.1.1
+```
+
+Consumers then resolve the binary straight from the release — nothing large lives
+in the repo.
 
 ### Local development without the xcframework
 

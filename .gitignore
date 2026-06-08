@@ -6,11 +6,13 @@
 rust/target/
 .xcframework-build/
 
+# Build artifacts — the xcframework is published as a GitHub Release asset by
+# scripts/release.sh, not committed.
+artifacts/
+CTantivy.xcframework.zip
+
 # Xcode
 *.xcodeproj
 DerivedData/
 
 .DS_Store
-
-# Keep:
-#   artifacts/CTantivy.xcframework  (the prebuilt redistributable, committed)
