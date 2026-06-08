@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (e.g. rapid PR pushes).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & test (host mode)
+    runs-on: macos-15
+
+    steps:
+      # No LFS checkout on purpose: CI builds the Rust engine from source and
+      # links that (host mode), so the committed ~87 MB xcframework isn't needed.
+      - uses: actions/checkout@v4
+
+      # Package.swift requires Swift 6.2, which ships with Xcode 26+. Bump this
+      # if the runner image's available Xcode versions change.
+      - name: Select Xcode (Swift 6.2+)
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26'
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          rustc --version
+          cargo --version
+
+      # Cache rust/target + the Cargo registry, keyed on rust/Cargo.lock.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      # Package.swift prefers the prebuilt xcframework when it's present. Remove
+      # it so the package links the freshly built host static library instead —
+      # this makes CI exercise the current rust/src/lib.rs, not the committed
+      # binary.
+      - name: Force host mode
+        run: rm -rf artifacts/CTantivy.xcframework
+
+      - name: Build Rust FFI (host)
+        run: scripts/build-host.sh
+
+      - name: Run tests
+        run: swift test
