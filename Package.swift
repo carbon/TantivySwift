@@ -5,31 +5,43 @@ import Foundation
 
 // Tantivy is a Swift wrapper around the tantivy 0.26.1 full-text search engine.
 //
-// It builds in one of two modes:
+// The C layer is resolved in one of three modes, in priority order:
 //
-//  * Distribution mode — when `artifacts/CTantivy.xcframework` exists, the C
-//    layer is consumed as a prebuilt XCFramework binary target. This is the
-//    mode that supports macOS, iOS and iPadOS. Build the xcframework with
-//    `scripts/build-xcframework.sh` (requires full Xcode).
+//  1. Local xcframework — if `artifacts/CTantivy.xcframework` exists on disk
+//     (e.g. a `scripts/release.sh` dry-run, or a maintainer testing a fresh
+//     build), it is consumed as a binary target directly.
 //
-//  * Host/dev mode — otherwise the C layer links against the host static
-//    library at `rust/target/release/libtantivy_ffi.a`, built with
-//    `scripts/build-host.sh`. This is for running the test suite locally on
-//    the Mac you build on; it does not produce a redistributable package.
+//  2. Host/dev mode — else, if the host static library
+//     `rust/target/release/libtantivy_ffi.a` exists (built with
+//     `scripts/build-host.sh`), the C layer links against it. This backs the
+//     local/CI test suite; it does not produce a redistributable package.
+//
+//  3. Distribution mode (the default for consumers) — else the prebuilt
+//     xcframework is downloaded from its GitHub Release asset and
+//     checksum-verified by SwiftPM. No Rust toolchain, no Git LFS, nothing to
+//     compile at app-build time. `scripts/release.sh` rewrites `release` and
+//     `checksum` below on each release.
 
 let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+
+// Published binary, downloaded + checksum-verified by SwiftPM on resolve.
+// scripts/release.sh rewrites these two lines for each release.
+let release  = "0.1.1"
+let checksum = "0000000000000000000000000000000000000000000000000000000000000000"
+let remoteXCFramework =
+    "https://github.com/carbon/TantivySwift/releases/download/\(release)/CTantivy.xcframework.zip"
+
 let xcframeworkPath = "artifacts/CTantivy.xcframework"
-let haveXCFramework = FileManager.default.fileExists(
-    atPath: packageRoot.appendingPathComponent(xcframeworkPath).path
-)
+let hostLibDir = packageRoot.appendingPathComponent("rust/target/release").path
+let fm = FileManager.default
 
 let cTarget: Target
-if haveXCFramework {
+if fm.fileExists(atPath: packageRoot.appendingPathComponent(xcframeworkPath).path) {
+    // 1. Locally-built xcframework takes precedence (release dry-run / testing).
     cTarget = .binaryTarget(name: "CTantivy", path: xcframeworkPath)
-} else {
-    // Link the host static library directly. Absolute -L path so it resolves
-    // regardless of the linker's working directory.
-    let hostLibDir = packageRoot.appendingPathComponent("rust/target/release").path
+} else if fm.fileExists(atPath: hostLibDir + "/libtantivy_ffi.a") {
+    // 2. Host static library. Absolute -L path so it resolves regardless of the
+    //    linker's working directory.
     cTarget = .target(
         name: "CTantivy",
         path: "Sources/CTantivy",
@@ -37,6 +49,9 @@ if haveXCFramework {
             .unsafeFlags(["-L", hostLibDir, "-ltantivy_ffi"])
         ]
     )
+} else {
+    // 3. Consumers: download the released, checksum-verified xcframework.
+    cTarget = .binaryTarget(name: "CTantivy", url: remoteXCFramework, checksum: checksum)
 }
 
 let package = Package(

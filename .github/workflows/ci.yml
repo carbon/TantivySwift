@@ -40,10 +40,10 @@ jobs:
         with:
           workspaces: rust
 
-      # Package.swift prefers the prebuilt xcframework when it's present. Remove
-      # it so the package links the freshly built host static library instead —
-      # this makes CI exercise the current rust/src/lib.rs, not the committed
-      # binary.
+      # The xcframework isn't committed (it ships as a Release asset), so a fresh
+      # checkout has neither a local xcframework nor a remote-resolvable binary;
+      # building the host lib below makes Package.swift link it (host mode). This
+      # rm is a defensive guard in case a local xcframework ever leaks in.
       - name: Force host mode
         run: rm -rf artifacts/CTantivy.xcframework
 
