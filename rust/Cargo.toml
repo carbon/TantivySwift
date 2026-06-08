@@ -1,0 +1,22 @@
+[package]
+name = "tantivy_ffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "tantivy_ffi"
+# staticlib: a self-contained .a we link straight into the Swift binary.
+crate-type = ["staticlib"]
+
+[dependencies]
+# Pinned to the exact tantivy 0.26.1 release from crates.io.
+tantivy = "=0.26.1"
+serde_json = "1"
+# RFC3339 parsing for date terms/ranges in the structured query API.
+time = { version = "0.3", features = ["parsing"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

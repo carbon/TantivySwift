@@ -1,0 +1,16 @@
+# SwiftPM
+.build/
+.swiftpm/
+
+# Rust build output
+rust/target/
+.xcframework-build/
+
+# Xcode
+*.xcodeproj
+DerivedData/
+
+.DS_Store
+
+# Keep:
+#   artifacts/CTantivy.xcframework  (the prebuilt redistributable, committed)
