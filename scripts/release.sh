@@ -81,7 +81,10 @@ scripts/build-xcframework.sh
 
 echo "==> Zipping $XCF -> $ASSET"
 rm -f "$ASSET"
-ditto -c -k --sequesterRsrc --keepParent "$XCF" "$ASSET"
+# zip -X excludes macOS metadata, so the archive has no __MACOSX / ._ AppleDouble
+# cruft. Safe for a static-library xcframework (no symlinks to preserve). cd into
+# the parent so the archive holds CTantivy.xcframework at its root.
+( cd "$(dirname "$XCF")" && zip -qr -X "$OLDPWD/$ASSET" "$(basename "$XCF")" )
 
 echo "==> Computing checksum"
 CHECKSUM="$(swift package compute-checksum "$ASSET")"

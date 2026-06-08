@@ -1,6 +1,5 @@
 // swift-tools-version: 6.2
 import PackageDescription
-import CompilerPluginSupport
 import Foundation
 
 // Tantivy is a Swift wrapper around the tantivy 0.26.1 full-text search engine.
@@ -63,25 +62,11 @@ let package = Package(
     products: [
         .library(name: "Tantivy", targets: ["Tantivy"]),
     ],
-    dependencies: [
-        // For the @Indexable macro (compile-time only; the macro plugin runs on
-        // the build host, it is not linked into your app).
-        .package(url: "https://github.com/swiftlang/swift-syntax.git", "600.0.0"..<"700.0.0"),
-    ],
     targets: [
         cTarget,
-        // Compiler-plugin target implementing @Indexable / @Field.
-        .macro(
-            name: "TantivyMacrosPlugin",
-            dependencies: [
-                .product(name: "SwiftSyntax", package: "swift-syntax"),
-                .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
-                .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
-            ]
-        ),
         .target(
             name: "Tantivy",
-            dependencies: ["CTantivy", "TantivyMacrosPlugin"],
+            dependencies: ["CTantivy"],
             // tantivy's static lib needs libiconv on Apple platforms
             // (-lSystem / -lc / -lm are linked implicitly).
             linkerSettings: [
