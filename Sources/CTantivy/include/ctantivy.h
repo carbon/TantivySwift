@@ -51,6 +51,10 @@ int tantivy_writer_add_json(CWriter *writer,
 /* Commit queued ops. Returns opstamp, or -1 on error. */
 int64_t tantivy_writer_commit(CWriter *writer, char **out_error);
 
+/* Discard all ops queued since the last commit. Returns the opstamp rolled back
+ * to, or -1 on error. */
+int64_t tantivy_writer_rollback(CWriter *writer, char **out_error);
+
 /* Delete all documents (effective on next commit). 0 ok, -1 error. */
 int tantivy_writer_delete_all(CWriter *writer, char **out_error);
 
@@ -63,6 +67,16 @@ int tantivy_writer_delete_term(CWriter *writer,
                                const char *field,
                                const char *value_json,
                                char **out_error);
+
+/*
+ * Delete all documents matching a structured query (same JSON grammar as
+ * tantivy_index_search_query). The query-based counterpart to
+ * tantivy_writer_delete_term (delete by range, by several terms, etc.).
+ * Effective on next commit. 0 ok, -1 error.
+ */
+int tantivy_writer_delete_query(CWriter *writer,
+                                const char *query_json,
+                                char **out_error);
 
 /* ---- searching ---- */
 
@@ -96,6 +110,22 @@ char *tantivy_index_search_query(CIndex *index,
                                  size_t snippet_max_chars,
                                  size_t limit,
                                  char **out_error);
+
+/*
+ * Count matches without loading documents. tantivy_index_count takes a string
+ * query (same default_fields_csv / boosts_json as tantivy_index_search);
+ * tantivy_index_count_query takes a structured query tree. Each returns the
+ * match count, or -1 on error.
+ */
+int64_t tantivy_index_count(CIndex *index,
+                            const char *query,
+                            const char *default_fields_csv,
+                            const char *boosts_json,
+                            char **out_error);
+
+int64_t tantivy_index_count_query(CIndex *index,
+                                  const char *query_json,
+                                  char **out_error);
 
 /* ---- misc ---- */
 

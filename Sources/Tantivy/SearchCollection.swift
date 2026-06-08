@@ -70,6 +70,11 @@ public final class SearchCollection<Model: Codable>: @unchecked Sendable {
         try index.write { try $0.deleteAllDocuments() }
     }
 
+    /// Delete all documents matching `query` (commit + reload).
+    public func remove(matching query: Query) throws {
+        try index.delete(matching: query)
+    }
+
     /// Reload so the latest commit is observable (only needed if you wrote via a
     /// raw `IndexWriter` rather than this collection's helpers).
     public func reload() throws { try index.reload() }
@@ -78,6 +83,18 @@ public final class SearchCollection<Model: Codable>: @unchecked Sendable {
 
     /// Number of searchable documents.
     public var count: Int { index.documentCount }
+
+    /// Number of documents matching `query` (without loading documents).
+    public func count(
+        _ query: String, fields: [String] = [], boosts: [String: Double] = [:]
+    ) throws -> Int {
+        try index.count(query, fields: fields, boosts: boosts)
+    }
+
+    /// Number of documents matching a structured ``Query`` (without loading docs).
+    public func count(matching query: Query) throws -> Int {
+        try index.count(query)
+    }
 
     /// Search and decode matches into `Model`.
     public func search(
