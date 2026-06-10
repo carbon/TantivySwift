@@ -98,6 +98,9 @@ public final class Index: @unchecked Sendable {
         _ query: String, limit: Int = 10, fields: [String] = [], boosts: [String: Double] = [:],
         highlight: [String] = [], snippetMaxChars: Int = 0
     ) throws(TantivyError) -> [SearchHit] {
+        try Self.validateQueryString(query)
+        try Self.validateNonNegative(limit, "limit")
+        try Self.validateNonNegative(snippetMaxChars, "snippetMaxChars")
         var err: UnsafeMutablePointer<CChar>?
         let csv = fields.joined(separator: ",")
         let boostsJSON = try Self.boostsJSON(boosts)
@@ -125,6 +128,8 @@ public final class Index: @unchecked Sendable {
     public func search(
         _ query: Query, limit: Int = 10, highlight: [String] = [], snippetMaxChars: Int = 0
     ) throws(TantivyError) -> [SearchHit] {
+        try Self.validateNonNegative(limit, "limit")
+        try Self.validateNonNegative(snippetMaxChars, "snippetMaxChars")
         var err: UnsafeMutablePointer<CChar>?
         let qjson = try query.jsonString()
         let snipCSV = highlight.joined(separator: ",")
@@ -147,6 +152,7 @@ public final class Index: @unchecked Sendable {
     public func count(
         _ query: String, fields: [String] = [], boosts: [String: Double] = [:]
     ) throws(TantivyError) -> Int {
+        try Self.validateQueryString(query)
         var err: UnsafeMutablePointer<CChar>?
         let csv = fields.joined(separator: ",")
         let boostsJSON = try Self.boostsJSON(boosts)
@@ -168,6 +174,23 @@ public final class Index: @unchecked Sendable {
         let n = qjson.withCString { tantivy_index_count_query(handle, $0, &err) }
         if n < 0 { throw TantivyError.take(&err, fallback: "count failed") }
         return Int(n)
+    }
+
+    // MARK: - Argument validation
+
+    /// A query string travels to the engine as a C string, so an interior NUL
+    /// would silently truncate it there — searching for less than was asked.
+    private static func validateQueryString(_ query: String) throws(TantivyError) {
+        if query.unicodeScalars.contains("\u{0}") {
+            throw .encoding("query string contains an interior NUL character")
+        }
+    }
+
+    /// Negative counts would wrap to huge values at the `usize` FFI boundary.
+    private static func validateNonNegative(_ value: Int, _ name: String) throws(TantivyError) {
+        if value < 0 {
+            throw .encoding("\(name) must be non-negative (got \(value))")
+        }
     }
 
     // MARK: - Result decoding
