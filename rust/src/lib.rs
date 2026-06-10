@@ -13,6 +13,11 @@
 //! is non-null, write a heap-allocated C string describing the error. The
 //! caller owns that string and must release it with `tantivy_string_free`.
 
+// Raw-pointer parameters are the C ABI itself; every dereference is
+// null-checked. Marking each export `unsafe` would change nothing for the
+// Swift caller.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::ffi::{c_char, CStr, CString};
 use std::os::raw::c_int;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -25,7 +30,7 @@ use tantivy::collector::{Count, TopDocs};
 use tantivy::directory::MmapDirectory;
 use tantivy::query::{
     AllQuery, BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, QueryParser,
-    RangeQuery, TermQuery,
+    RangeQuery, RegexQuery, TermQuery,
 };
 use tantivy::schema::document::Document;
 use tantivy::schema::{
@@ -674,7 +679,10 @@ fn execute_search(
         generators.push((idx.schema.get_field_name(f).to_string(), g));
     }
 
+    // Cap at the corpus size so an absurd limit (e.g. usize::MAX from a caller
+    // bug) cannot make TopDocs preallocate and panic; results are unaffected.
     let limit = if limit == 0 { 10 } else { limit };
+    let limit = limit.min(searcher.num_docs().max(1) as usize);
     let top = searcher
         .search(query, &TopDocs::with_limit(limit).order_by_score())
         .map_err(|e| format!("search failed: {e}"))?;
@@ -810,6 +818,13 @@ fn build_query(schema: &Schema, node: &serde_json::Value) -> Result<Box<dyn Quer
             };
             Ok(Box::new(q))
         }
+        "regex" => {
+            let (field, value) = field_and_value(schema, node)?;
+            let pattern = value.as_str().ok_or("regex 'value' must be a string")?;
+            let q = RegexQuery::from_pattern(pattern, field)
+                .map_err(|e| format!("invalid regex pattern: {e}"))?;
+            Ok(Box::new(q))
+        }
         "phrase" => {
             let name = node
                 .get("field")
@@ -856,6 +871,11 @@ fn build_query(schema: &Schema, node: &serde_json::Value) -> Result<Box<dyn Quer
                 .map_err(|_| format!("unknown field '{name}'"))?;
             let lower = bound_for(schema, field, node.get("lower"))?;
             let upper = bound_for(schema, field, node.get("upper"))?;
+            // tantivy's RangeQuery derives its field from a bound term, so a
+            // fully unbounded range would panic inside the engine.
+            if matches!(lower, Bound::Unbounded) && matches!(upper, Bound::Unbounded) {
+                return Err(format!("range on '{name}' requires at least one bound"));
+            }
             Ok(Box::new(RangeQuery::new(lower, upper)))
         }
         "boost" => {
@@ -879,11 +899,18 @@ fn build_query(schema: &Schema, node: &serde_json::Value) -> Result<Box<dyn Quer
                 let cq = build_query(schema, c.get("query").ok_or("clause requires 'query'")?)?;
                 subs.push((occur, cq));
             }
-            match node.get("minimum_should_match").and_then(|x| x.as_u64()) {
-                Some(min) => Ok(Box::new(BooleanQuery::with_minimum_required_clauses(
-                    subs, min as usize,
-                ))),
-                None => Ok(Box::new(BooleanQuery::new(subs))),
+            match node.get("minimum_should_match") {
+                None | Some(serde_json::Value::Null) => Ok(Box::new(BooleanQuery::new(subs))),
+                Some(v) => {
+                    // Reject (rather than ignore) a negative or non-integer
+                    // minimum — silently dropping it would widen the match set.
+                    let min = v
+                        .as_u64()
+                        .ok_or("minimum_should_match must be a non-negative integer")?;
+                    Ok(Box::new(BooleanQuery::with_minimum_required_clauses(
+                        subs, min as usize,
+                    )))
+                }
             }
         }
         other => Err(format!("unknown query type '{other}'")),

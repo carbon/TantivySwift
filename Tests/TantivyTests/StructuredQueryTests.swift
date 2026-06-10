@@ -91,6 +91,34 @@ struct StructuredQueryTests {
         #expect(titles(hits) == ["Moby Dick"])
     }
 
+    @Test func prefixMatchesIndexedToken() throws {
+        // default tokenizer lowercases; "mob" is the prefix of "moby".
+        #expect(titles(try corpus().search(.prefix("title", "mob"))) == ["Moby Dick"])
+    }
+
+    @Test func prefixIsExactNotTypoTolerant() throws {
+        // "mob" -> "moby" but "moc" should not (edit-distance 1, zero allowed).
+        #expect(try corpus().search(.prefix("title", "moc")).isEmpty)
+    }
+
+    @Test func autocompleteToleratesTypos() throws {
+        // "mopy" is one edit (p->b) from the "moby" prefix of "Moby Dick".
+        #expect(titles(try corpus().search(.autocomplete("title", "mopy"))) == ["Moby Dick"])
+        // typoTolerance: 0 collapses to an exact prefix, so the typo no longer matches.
+        #expect(try corpus().search(.autocomplete("title", "mopy", typoTolerance: 0)).isEmpty)
+    }
+
+    @Test func regexMatchesIndexedToken() throws {
+        // pattern is anchored to the whole token: "m.*" matches "moby"/"man"/"mice"/"me".
+        #expect(titles(try corpus().search(.regex("title", "mob.*"))) == ["Moby Dick"])
+    }
+
+    @Test func invalidRegexThrows() throws {
+        #expect(throws: TantivyError.self) {
+            try corpus().search(.regex("title", "[unterminated"))
+        }
+    }
+
     @Test func dateRange() throws {
         let q = Query.dateRange("created",
                                 from: date("1900-01-01T00:00:00Z"),
