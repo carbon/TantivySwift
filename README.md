@@ -135,11 +135,21 @@ try index.reload()                                  // observe latest commit
 try index.search(_:limit:fields:)                   // -> [SearchHit]
 try index.count("sea")                              // match count, no docs loaded
 try index.count(.range("year", 1900...2000))        // count a structured Query
+try index.get("id", equals: "abc123")               // fetch one doc by id term
 ```
 
 `Index(path:)` creates the index if the directory is empty, or opens the
 existing one (the schema must match). On iOS, pass a writable location such as
 `Application Support` or `Caches`.
+
+By default searches observe new commits only after `reload()`. Pass
+`reloadPolicy: .onCommit` to have a background watcher reload shortly after
+every commit instead — near-real-time, no `reload()` calls, but a search
+immediately after `commit()` may briefly see the previous generation:
+
+```swift
+let index = try Index(path: url, schema: schema, reloadPolicy: .onCommit)
+```
 
 ### Writing
 
@@ -172,7 +182,13 @@ try index.upsert(card, idField: "id", id: card.id)   // delete-by-term + add
 ```
 
 The id field should be a single-token field (a `string`/raw or numeric/bool
-field) so the term matches the whole value.
+field) so the term matches the whole value. `get` is the read counterpart — a
+scoreless fetch of the first document with that id term:
+
+```swift
+let hit = try index.get("id", equals: card.id)        // SearchHit?
+let card = try cards.get(idField: "id", id: card.id)  // typed, on a collection
+```
 
 ### Querying & results
 
@@ -227,8 +243,9 @@ let books = try index.search(q, as: Book.self)        // typed
 let scored = try collection.searchScored(q)           // [(score, Book)]
 ```
 
-Builders: `.matchAll`, `.term(field, value)` (string / Int / UInt64 / Double /
-Bool / `date:`), `.phrase(field, [tokens], slop:)`, `.fuzzy(field, value,
+Builders: `.matchAll`, `.parsed(query, fields:)`, `.term(field, value)` (string
+/ Int / UInt64 / Double / Bool / `date:`), `.phrase(field, [tokens], slop:)`,
+`.phrasePrefix(field, [tokens], maxExpansions:)`, `.fuzzy(field, value,
 distance:…)`, `.prefix(field, value)`, `.autocomplete(field, value,
 typoTolerance:)`, `.regex(field, pattern)`, `.range(field, 1900...2000)` /
 `.dateRange(field, from:to:)`, `.allOf` / `.anyOf(_, minimumShouldMatch:)`,
@@ -236,7 +253,19 @@ typoTolerance:)`, `.regex(field, pattern)`, `.range(field, 1900...2000)` /
 
 > `term`/`phrase` match **indexed tokens exactly** (as tantivy does): on a
 > tokenized text field pass already-analyzed tokens (e.g. lowercase for the
-> `default` tokenizer). For analyzed/free-text input, use the string `search`.
+> `default` tokenizer). For analyzed/free-text input, use the string `search` —
+> or embed it with `.parsed`.
+
+**Mixing in user input.** `.parsed` embeds a query *string* (full tantivy
+syntax, analyzed by the engine) as a node in a structured query — the bridge
+between the two APIs, and the natural shape for "what the user typed plus my
+filters":
+
+```swift
+let q: Query = .parsed(searchField.text) && .term("tag", "book")
+try index.search(q)
+try index.delete(matching: .parsed("status:draft"))   // works for deletes too
+```
 
 #### Typeahead / autocomplete
 
@@ -250,10 +279,36 @@ tokens against a (whole-token-anchored) regular expression.
 try index.search(.prefix("title", "mob"))                 // exact prefix
 try index.search(.autocomplete("title", "mopy"))          // typo-tolerant prefix
 try index.search(.regex("title", "m(oby|ice).*"))         // regex over tokens
+try index.search(.phrasePrefix("title", ["old", "ma"]))   // multi-word typeahead
 ```
+
+`.phrasePrefix` is the multi-word counterpart: every term but the last matches
+exactly (in order, like `phrase`), and the last is a prefix — `["old", "ma"]`
+matches "old man". The field needs positions (the default) when more than one
+term is given.
 
 > Like `term`, these match **indexed tokens**: pass an already-analyzed prefix
 > (e.g. lowercase for the `default` tokenizer).
+
+#### Facet counts & aggregations
+
+`termCounts` returns the top values of a field among matching documents, with
+counts — the classic filter sidebar. The field must be `fast: true` in the
+schema:
+
+```swift
+let tags = try index.termCounts("tag", matching: .parsed("old man"))
+// [FacetCount(value: .string("book"), count: 2),
+//  FacetCount(value: .string("classic"), count: 1)]
+```
+
+The full tantivy aggregation engine (terms, histogram, stats, min/max/avg,
+nested sub-aggregations; Elasticsearch-compatible request format) is available
+through the raw JSON API:
+
+```swift
+let json = try index.aggregate(#"{"avg_year": {"avg": {"field": "year"}}}"#)
+```
 
 ### Convenience helpers
 
