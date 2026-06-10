@@ -16,10 +16,12 @@ import Foundation
 /// `default` tokenizer). For analyzed/parsed input, use the string `search`.
 public enum Query: Sendable {
     case matchAll
+    case parsed(query: String, fields: [String])
     case term(field: String, value: TermValue)
     case fuzzy(field: String, value: String, distance: UInt8, transposition: Bool, prefix: Bool)
     case regex(field: String, pattern: String)
     case phrase(field: String, terms: [String], slop: UInt32)
+    case phrasePrefix(field: String, terms: [String], maxExpansions: UInt32)
     case range(field: String, lower: RangeBound?, upper: RangeBound?)
     indirect case boost(Query, Float)
     indirect case boolean(must: [Query], should: [Query], mustNot: [Query], minimumShouldMatch: Int?)
@@ -54,8 +56,34 @@ extension Query {
     public static func term(_ field: String, _ value: Double) -> Query { .term(field: field, value: .double(value)) }
     public static func term(_ field: String, date value: Date) -> Query { .term(field: field, value: .date(value)) }
 
+    /// Embed a query *string* (tantivy query syntax, analyzed and parsed by the
+    /// engine) as a node in a structured query — the bridge between the two
+    /// search APIs. Use it to combine what the user typed with programmatic
+    /// filters:
+    ///
+    /// ```swift
+    /// let q: Query = .parsed("old man") && .term("tag", "book")
+    /// ```
+    ///
+    /// Unlike `term`/`phrase`, the string goes through the field's analyzer, so
+    /// raw user input works as-is. `fields` are the default fields searched when
+    /// the string doesn't name one (empty → all indexed text fields).
+    public static func parsed(_ query: String, fields: [String] = []) -> Query {
+        .parsed(query: query, fields: fields)
+    }
+
     public static func phrase(_ field: String, _ terms: [String], slop: UInt32 = 0) -> Query {
         .phrase(field: field, terms: terms, slop: slop)
+    }
+
+    /// Match a phrase whose *last* term is a prefix — multi-word typeahead
+    /// (e.g. `["old", "ma"]` matches "old man"). The single-token counterpart is
+    /// ``prefix(_:_:)``. Like `phrase`, terms match indexed tokens, and the
+    /// field needs positions (`indexing: .position`, the default) when more
+    /// than one term is given. `maxExpansions` caps how many distinct tokens
+    /// the prefix may expand to.
+    public static func phrasePrefix(_ field: String, _ terms: [String], maxExpansions: UInt32 = 50) -> Query {
+        .phrasePrefix(field: field, terms: terms, maxExpansions: maxExpansions)
     }
 
     public static func fuzzy(
@@ -167,6 +195,8 @@ extension Query {
         switch self {
         case .matchAll:
             return ["type": "all"]
+        case .parsed(let query, let fields):
+            return ["type": "parsed", "query": query, "fields": fields]
         case .term(let field, let value):
             return ["type": "term", "field": field, "value": value.jsonValue()]
         case .fuzzy(let field, let value, let distance, let transposition, let prefix):
@@ -176,6 +206,9 @@ extension Query {
             return ["type": "regex", "field": field, "value": pattern]
         case .phrase(let field, let terms, let slop):
             return ["type": "phrase", "field": field, "terms": terms, "slop": Int(slop)]
+        case .phrasePrefix(let field, let terms, let maxExpansions):
+            return ["type": "phrase_prefix", "field": field, "terms": terms,
+                    "max_expansions": Int(maxExpansions)]
         case .range(let field, let lower, let upper):
             var node: [String: Any] = ["type": "range", "field": field]
             if let lower { node["lower"] = lower.jsonObject() }
@@ -211,7 +244,7 @@ extension Query {
             return true
         }
         switch self {
-        case .matchAll, .fuzzy, .regex, .phrase:
+        case .matchAll, .parsed, .fuzzy, .regex, .phrase, .phrasePrefix:
             break
         case .term(_, let value):
             if !finite(value) { throw .encoding("non-finite number in term query") }

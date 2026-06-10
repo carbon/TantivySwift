@@ -28,9 +28,11 @@ use std::ops::Bound;
 use serde_json::json;
 use tantivy::collector::{Count, TopDocs};
 use tantivy::directory::MmapDirectory;
+use tantivy::aggregation::agg_req::Aggregations;
+use tantivy::aggregation::AggregationCollector;
 use tantivy::query::{
-    AllQuery, BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, QueryParser,
-    RangeQuery, RegexQuery, TermQuery,
+    AllQuery, BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhrasePrefixQuery, PhraseQuery,
+    Query, QueryParser, RangeQuery, RegexQuery, TermQuery,
 };
 use tantivy::schema::document::Document;
 use tantivy::schema::{
@@ -247,11 +249,16 @@ fn default_text_fields(schema: &Schema) -> Vec<Field> {
 /// `path` null or empty -> an in-RAM index (not persisted).
 /// Otherwise `path` must be a directory; it is created if missing.
 ///
+/// `reload_on_commit` non-zero -> the reader reloads itself shortly after each
+/// commit (tantivy's `OnCommitWithDelay`); zero -> reload only via
+/// `tantivy_index_reload` (manual).
+///
 /// Returns null on error.
 #[no_mangle]
 pub extern "C" fn tantivy_index_open_or_create(
     path: *const c_char,
     schema_json: *const c_char,
+    reload_on_commit: c_int,
     out_error: *mut *mut c_char,
 ) -> *mut CIndex {
     guard(out_error, ptr::null_mut(), || {
@@ -273,9 +280,14 @@ pub extern "C" fn tantivy_index_open_or_create(
 
         register_analyzers(&index);
 
+        let policy = if reload_on_commit != 0 {
+            ReloadPolicy::OnCommitWithDelay
+        } else {
+            ReloadPolicy::Manual
+        };
         let reader = index
             .reader_builder()
-            .reload_policy(ReloadPolicy::Manual)
+            .reload_policy(policy)
             .try_into()
             .map_err(|e| format!("reader init failed: {e}"))?;
 
@@ -499,8 +511,9 @@ pub extern "C" fn tantivy_writer_delete_query(
         let qjson = unsafe { opt_str(query_json) }.ok_or("query_json must be valid UTF-8")?;
         let tree: serde_json::Value =
             serde_json::from_str(qjson).map_err(|e| format!("invalid query JSON: {e}"))?;
-        let schema = w.writer.index().schema();
-        let query = build_query(&schema, &tree)?;
+        let index = w.writer.index();
+        let schema = index.schema();
+        let query = build_query(index, &schema, &tree)?;
         w.writer
             .delete_query(query)
             .map_err(|e| format!("delete_query failed: {e}"))?;
@@ -632,9 +645,12 @@ pub extern "C" fn tantivy_index_count(
 //
 // A query is a JSON tree, tagged by "type":
 //   {"type":"all"}
+//   {"type":"parsed","query":S,"fields":[F,...]?}   (tantivy query syntax)
 //   {"type":"term","field":F,"value":V}
 //   {"type":"fuzzy","field":F,"value":S,"distance":1,"transposition":true,"prefix":false}
+//   {"type":"regex","field":F,"value":S}
 //   {"type":"phrase","field":F,"terms":[S,...],"slop":0}
+//   {"type":"phrase_prefix","field":F,"terms":[S,...],"max_expansions":N?}
 //   {"type":"range","field":F,"lower":{"value":V,"included":true}|null,"upper":...}
 //   {"type":"boost","query":NODE,"boost":2.0}
 //   {"type":"boolean","clauses":[{"occur":"must|should|must_not","query":NODE}],
@@ -786,14 +802,44 @@ fn bound_for(
     }
 }
 
-/// Recursively build a tantivy `Query` from the JSON tree.
-fn build_query(schema: &Schema, node: &serde_json::Value) -> Result<Box<dyn Query>, String> {
+/// Recursively build a tantivy `Query` from the JSON tree. Takes the `Index`
+/// (not just the schema) because the `parsed` node runs tantivy's
+/// `QueryParser`, which needs the index's tokenizer manager.
+fn build_query(
+    index: &Index,
+    schema: &Schema,
+    node: &serde_json::Value,
+) -> Result<Box<dyn Query>, String> {
     let ty = node
         .get("type")
         .and_then(|x| x.as_str())
         .ok_or("query node missing 'type'")?;
     match ty {
         "all" => Ok(Box::new(AllQuery)),
+        "parsed" => {
+            let q = node
+                .get("query")
+                .and_then(|x| x.as_str())
+                .ok_or("parsed requires a string 'query'")?;
+            let fields = match node.get("fields").and_then(|x| x.as_array()) {
+                Some(arr) if !arr.is_empty() => {
+                    let mut v = Vec::with_capacity(arr.len());
+                    for f in arr {
+                        let name = f.as_str().ok_or("parsed 'fields' must be strings")?;
+                        v.push(
+                            schema
+                                .get_field(name)
+                                .map_err(|_| format!("unknown field '{name}'"))?,
+                        );
+                    }
+                    v
+                }
+                _ => default_text_fields(schema),
+            };
+            QueryParser::for_index(index, fields)
+                .parse_query(q)
+                .map_err(|e| format!("could not parse query: {e}"))
+        }
         "term" => {
             let (field, value) = field_and_value(schema, node)?;
             Ok(Box::new(TermQuery::new(
@@ -861,6 +907,35 @@ fn build_query(schema: &Schema, node: &serde_json::Value) -> Result<Box<dyn Quer
                 }
             }
         }
+        "phrase_prefix" => {
+            let name = node
+                .get("field")
+                .and_then(|x| x.as_str())
+                .ok_or("phrase_prefix missing 'field'")?;
+            let field = schema
+                .get_field(name)
+                .map_err(|_| format!("unknown field '{name}'"))?;
+            let terms_json = node
+                .get("terms")
+                .and_then(|x| x.as_array())
+                .ok_or("phrase_prefix requires a 'terms' array")?;
+            let terms: Vec<Term> = terms_json
+                .iter()
+                .map(|t| {
+                    t.as_str()
+                        .map(|s| Term::from_field_text(field, s))
+                        .ok_or_else(|| "phrase_prefix terms must be strings".to_string())
+                })
+                .collect::<Result<_, _>>()?;
+            if terms.is_empty() {
+                return Err("phrase_prefix requires at least one term".to_string());
+            }
+            let mut q = PhrasePrefixQuery::new(terms);
+            if let Some(n) = node.get("max_expansions").and_then(|x| x.as_u64()) {
+                q.set_max_expansions(n as u32);
+            }
+            Ok(Box::new(q))
+        }
         "range" => {
             let name = node
                 .get("field")
@@ -881,7 +956,10 @@ fn build_query(schema: &Schema, node: &serde_json::Value) -> Result<Box<dyn Quer
         "boost" => {
             let child = node.get("query").ok_or("boost requires 'query'")?;
             let boost = node.get("boost").and_then(|x| x.as_f64()).unwrap_or(1.0) as f32;
-            Ok(Box::new(BoostQuery::new(build_query(schema, child)?, boost)))
+            Ok(Box::new(BoostQuery::new(
+                build_query(index, schema, child)?,
+                boost,
+            )))
         }
         "boolean" => {
             let clauses = node
@@ -896,7 +974,8 @@ fn build_query(schema: &Schema, node: &serde_json::Value) -> Result<Box<dyn Quer
                     "should" => Occur::Should,
                     other => return Err(format!("unknown occur '{other}'")),
                 };
-                let cq = build_query(schema, c.get("query").ok_or("clause requires 'query'")?)?;
+                let cq =
+                    build_query(index, schema, c.get("query").ok_or("clause requires 'query'")?)?;
                 subs.push((occur, cq));
             }
             match node.get("minimum_should_match") {
@@ -935,7 +1014,7 @@ pub extern "C" fn tantivy_index_search_query(
         let qjson = unsafe { opt_str(query_json) }.ok_or("query_json must be valid UTF-8")?;
         let tree: serde_json::Value =
             serde_json::from_str(qjson).map_err(|e| format!("invalid query JSON: {e}"))?;
-        let query = build_query(&idx.schema, &tree)?;
+        let query = build_query(&idx.index, &idx.schema, &tree)?;
 
         let snippet_fields = resolve_fields_csv(&idx.schema, unsafe { opt_str(snippet_fields_csv) })?;
         execute_search(idx, &*query, limit, &snippet_fields, snippet_max_chars)
@@ -956,13 +1035,54 @@ pub extern "C" fn tantivy_index_count_query(
         let qjson = unsafe { opt_str(query_json) }.ok_or("query_json must be valid UTF-8")?;
         let tree: serde_json::Value =
             serde_json::from_str(qjson).map_err(|e| format!("invalid query JSON: {e}"))?;
-        let query = build_query(&idx.schema, &tree)?;
+        let query = build_query(&idx.index, &idx.schema, &tree)?;
         let n = idx
             .reader
             .searcher()
             .search(&*query, &Count)
             .map_err(|e| format!("count failed: {e}"))?;
         Ok(n as i64)
+    })
+}
+
+/// Run a tantivy aggregation over the documents matching a structured query.
+///
+/// `query_json` is the structured query grammar above; `aggregations_json` is
+/// tantivy's (Elasticsearch-compatible) aggregation request, e.g.:
+///
+///   {"tags":{"terms":{"field":"tag","size":10}}}
+///
+/// Aggregated fields must be `fast` in the schema. Returns the aggregation
+/// result as JSON (free with `tantivy_string_free`), or null on error.
+#[no_mangle]
+pub extern "C" fn tantivy_index_aggregate(
+    index: *mut CIndex,
+    query_json: *const c_char,
+    aggregations_json: *const c_char,
+    out_error: *mut *mut c_char,
+) -> *mut c_char {
+    guard(out_error, ptr::null_mut(), || {
+        let idx = unsafe { index.as_ref() }.ok_or("index handle is null")?;
+        let qjson = unsafe { opt_str(query_json) }.ok_or("query_json must be valid UTF-8")?;
+        let tree: serde_json::Value =
+            serde_json::from_str(qjson).map_err(|e| format!("invalid query JSON: {e}"))?;
+        let query = build_query(&idx.index, &idx.schema, &tree)?;
+
+        let ajson = unsafe { opt_str(aggregations_json) }
+            .ok_or("aggregations_json must be valid UTF-8")?;
+        let aggs: Aggregations = serde_json::from_str(ajson)
+            .map_err(|e| format!("invalid aggregations JSON: {e}"))?;
+        let collector = AggregationCollector::from_aggs(aggs, Default::default());
+        let res = idx
+            .reader
+            .searcher()
+            .search(&*query, &collector)
+            .map_err(|e| format!("aggregation failed: {e}"))?;
+        let out = serde_json::to_string(&res)
+            .map_err(|e| format!("could not serialize aggregation result: {e}"))?;
+        CString::new(out)
+            .map(CString::into_raw)
+            .map_err(|_| "result contained interior NUL".to_string())
     })
 }
 

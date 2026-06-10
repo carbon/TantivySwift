@@ -29,15 +29,20 @@ public final class SearchCollection<Model: Codable>: @unchecked Sendable {
     }
 
     /// Open or create the collection's index at `path` (nil → in-memory).
-    public convenience init(path: URL?, schema: Schema) throws {
-        self.init(index: try Index(path: path, schema: schema))
+    public convenience init(
+        path: URL?, schema: Schema, reloadPolicy: Index.ReloadPolicy = .manual
+    ) throws {
+        self.init(index: try Index(path: path, schema: schema, reloadPolicy: reloadPolicy))
     }
 
     /// Open or create the collection's index, building the schema inline.
-    public convenience init(path: URL? = nil, _ buildSchema: (SchemaBuilder) -> Void) throws {
+    public convenience init(
+        path: URL? = nil, reloadPolicy: Index.ReloadPolicy = .manual,
+        _ buildSchema: (SchemaBuilder) -> Void
+    ) throws {
         let builder = SchemaBuilder()
         buildSchema(builder)
-        self.init(index: try Index(path: path, schema: builder.build()))
+        self.init(index: try Index(path: path, schema: builder.build(), reloadPolicy: reloadPolicy))
     }
 
     /// An in-memory collection (not persisted).
@@ -57,6 +62,12 @@ public final class SearchCollection<Model: Codable>: @unchecked Sendable {
     /// (delete-by-term + add) in a single commit. Use a single-token id field.
     public func upsert(_ value: Model, idField: String, id: String) throws {
         try index.upsert(value, idField: idField, id: id)
+    }
+
+    /// The model whose `idField` equals `id`, if any — a scoreless fetch by id,
+    /// complementing `upsert`. Use a single-token id field.
+    public func get(idField: String, id: String) throws -> Model? {
+        try index.get(idField, equals: id)?.decode(Model.self)
     }
 
     /// Run a batch of writer operations in one commit (see `Index.write`).

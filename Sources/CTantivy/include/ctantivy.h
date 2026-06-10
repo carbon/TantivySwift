@@ -21,9 +21,12 @@ typedef struct CWriter CWriter;
 
 /* ---- index lifecycle ---- */
 
-/* Open or create an index. `path` NULL/empty -> in-RAM. Returns NULL on error. */
+/* Open or create an index. `path` NULL/empty -> in-RAM. `reload_on_commit`
+ * non-zero -> the reader reloads itself shortly after each commit; zero ->
+ * reload only via tantivy_index_reload(). Returns NULL on error. */
 CIndex *tantivy_index_open_or_create(const char *path,
                                      const char *schema_json,
+                                     int reload_on_commit,
                                      char **out_error);
 
 void tantivy_index_free(CIndex *index);
@@ -100,9 +103,9 @@ char *tantivy_index_search(CIndex *index,
 
 /*
  * Run a structured query (a JSON query tree mirroring tantivy's Query types:
- * all / term / fuzzy / phrase / range / boost / boolean). Same hit envelope as
- * tantivy_index_search. Returns a heap string (free with tantivy_string_free),
- * or NULL on error.
+ * all / parsed / term / fuzzy / regex / phrase / phrase_prefix / range /
+ * boost / boolean). Same hit envelope as tantivy_index_search. Returns a heap
+ * string (free with tantivy_string_free), or NULL on error.
  */
 char *tantivy_index_search_query(CIndex *index,
                                  const char *query_json,
@@ -126,6 +129,17 @@ int64_t tantivy_index_count(CIndex *index,
 int64_t tantivy_index_count_query(CIndex *index,
                                   const char *query_json,
                                   char **out_error);
+
+/*
+ * Run a tantivy aggregation (Elasticsearch-compatible request JSON, e.g.
+ * {"tags":{"terms":{"field":"tag","size":10}}}) over the documents matching a
+ * structured query. Aggregated fields must be `fast` in the schema. Returns
+ * the result JSON (free with tantivy_string_free), or NULL on error.
+ */
+char *tantivy_index_aggregate(CIndex *index,
+                              const char *query_json,
+                              const char *aggregations_json,
+                              char **out_error);
 
 /* ---- misc ---- */
 

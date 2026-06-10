@@ -83,4 +83,17 @@ extension Index {
     public func delete(matching query: Query) throws {
         try write { try $0.deleteDocuments(matching: query) }
     }
+
+    /// The first document whose `field` equals `value` — a scoreless fetch by
+    /// id, complementing `upsert`. Use a single-token field (a `string`/raw or
+    /// numeric id); on a tokenized text field this matches a single token.
+    public func get(_ field: String, equals value: String) throws(TantivyError) -> SearchHit? {
+        try search(.term(field, value), limit: 1).first
+    }
+    public func get(_ field: String, equals value: Int64) throws(TantivyError) -> SearchHit? {
+        try search(.term(field, value), limit: 1).first
+    }
+    public func get(_ field: String, equals value: UInt64) throws(TantivyError) -> SearchHit? {
+        try search(.term(field, value), limit: 1).first
+    }
 }

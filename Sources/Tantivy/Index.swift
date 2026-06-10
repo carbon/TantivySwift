@@ -30,18 +30,33 @@ public final class Index: @unchecked Sendable {
     /// The schema this index was created/opened with.
     public let schema: Schema
 
+    /// When searches start observing new commits.
+    public enum ReloadPolicy: Sendable {
+        /// Only after an explicit `reload()` (or `commitAndReload()` / the
+        /// `write` helpers, which reload for you). The default.
+        case manual
+        /// A background watcher reloads the reader shortly after every commit —
+        /// near-real-time with no `reload()` calls needed, but not strict
+        /// read-your-writes: a search immediately after `commit()` may briefly
+        /// observe the previous generation.
+        case onCommit
+    }
+
     /// Open the index at `path`, creating it (with `schema`) if absent.
     /// Pass `path: nil` for an in-memory index that is never persisted.
-    public init(path: URL?, schema: Schema) throws(TantivyError) {
+    public init(
+        path: URL?, schema: Schema, reloadPolicy: ReloadPolicy = .manual
+    ) throws(TantivyError) {
         var err: UnsafeMutablePointer<CChar>?
         let pathStr = path?.path
+        let onCommit: Int32 = reloadPolicy == .onCommit ? 1 : 0
         let h: OpaquePointer? = schema.json.withCString { schemaC in
             if let p = pathStr {
                 return p.withCString { pathC in
-                    tantivy_index_open_or_create(pathC, schemaC, &err)
+                    tantivy_index_open_or_create(pathC, schemaC, onCommit, &err)
                 }
             } else {
-                return tantivy_index_open_or_create(nil, schemaC, &err)
+                return tantivy_index_open_or_create(nil, schemaC, onCommit, &err)
             }
         }
         guard let h else { throw TantivyError.take(&err, fallback: "could not open index") }
@@ -50,8 +65,10 @@ public final class Index: @unchecked Sendable {
     }
 
     /// Create an in-memory index (not persisted to disk).
-    public static func inMemory(schema: Schema) throws(TantivyError) -> Index {
-        try Index(path: nil, schema: schema)
+    public static func inMemory(
+        schema: Schema, reloadPolicy: ReloadPolicy = .manual
+    ) throws(TantivyError) -> Index {
+        try Index(path: nil, schema: schema, reloadPolicy: reloadPolicy)
     }
 
     deinit { tantivy_index_free(handle) }
