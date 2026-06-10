@@ -16,3 +16,4 @@ CTantivy.xcframework.zip
 DerivedData/
 
 .DS_Store
+/artifacts.bak
