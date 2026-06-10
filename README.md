@@ -214,7 +214,8 @@ full `i64` and `u64` ranges (`FieldValue` has both `.int(Int64)` and
 
 A second search API builds a query *tree* that maps directly onto tantivy's own
 query types (`TermQuery`, `PhraseQuery`, `RangeQuery`, `BooleanQuery`,
-`BoostQuery`, `FuzzyTermQuery`, `AllQuery`) — no string parsing, no escaping.
+`BoostQuery`, `FuzzyTermQuery`, `RegexQuery`, `AllQuery`) — no string parsing,
+no escaping.
 
 ```swift
 let q: Query =
@@ -228,13 +229,31 @@ let scored = try collection.searchScored(q)           // [(score, Book)]
 
 Builders: `.matchAll`, `.term(field, value)` (string / Int / UInt64 / Double /
 Bool / `date:`), `.phrase(field, [tokens], slop:)`, `.fuzzy(field, value,
-distance:…)`, `.range(field, 1900...2000)` / `.dateRange(field, from:to:)`,
-`.allOf` / `.anyOf(_, minimumShouldMatch:)`, `&&`, `||`, `.excluding(_)`,
-`.boosted(by:)`.
+distance:…)`, `.prefix(field, value)`, `.autocomplete(field, value,
+typoTolerance:)`, `.regex(field, pattern)`, `.range(field, 1900...2000)` /
+`.dateRange(field, from:to:)`, `.allOf` / `.anyOf(_, minimumShouldMatch:)`,
+`&&`, `||`, `.excluding(_)`, `.boosted(by:)`.
 
 > `term`/`phrase` match **indexed tokens exactly** (as tantivy does): on a
 > tokenized text field pass already-analyzed tokens (e.g. lowercase for the
 > `default` tokenizer). For analyzed/free-text input, use the string `search`.
+
+#### Typeahead / autocomplete
+
+`.prefix` and `.autocomplete` are the typeahead primitives — `.prefix("title",
+"nor")` matches indexed tokens that *start with* `nor` (`north`, `norway`);
+`.autocomplete` is the same but allows up to `typoTolerance` edits on the prefix
+(default 1) so `mopy` still finds `moby`. `.regex("title", "mob.*")` matches
+tokens against a (whole-token-anchored) regular expression.
+
+```swift
+try index.search(.prefix("title", "mob"))                 // exact prefix
+try index.search(.autocomplete("title", "mopy"))          // typo-tolerant prefix
+try index.search(.regex("title", "m(oby|ice).*"))         // regex over tokens
+```
+
+> Like `term`, these match **indexed tokens**: pass an already-analyzed prefix
+> (e.g. lowercase for the `default` tokenizer).
 
 ### Convenience helpers
 
