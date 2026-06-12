@@ -210,6 +210,18 @@ empty means *all indexed text fields*. `boosts:` applies per-field weights:
 try index.search("dune", boosts: ["title": 2.0, "body": 0.5])
 ```
 
+`orderBy:` replaces relevance ranking with a field sort — the field must be a
+numeric (`u64`/`i64`/`f64`) or `date` field declared `fast: true` in the
+schema. Works on both the string and structured `search`:
+
+```swift
+try index.search("dune", orderBy: .descending("created"))        // newest first
+try index.search(.term("tag", "book"), orderBy: .ascending("year"))
+```
+
+Field-ordered hits carry a `score` of 0 (tantivy returns the sort key in place
+of computing BM25).
+
 Each result is a `SearchHit`:
 
 ```swift

@@ -30,6 +30,24 @@ public final class Index: @unchecked Sendable {
     /// The schema this index was created/opened with.
     public let schema: Schema
 
+    /// How to order search hits: by a fast field instead of relevance.
+    ///
+    /// The field must be a numeric (`u64`/`i64`/`f64`) or `date` field declared
+    /// `fast: true` in the schema. Field-ordered hits carry a `score` of 0
+    /// (tantivy returns the sort key in place of computing BM25).
+    public struct OrderBy: Sendable {
+        public let field: String
+        public let ascending: Bool
+        /// Largest value first (newest date, highest number).
+        public static func descending(_ field: String) -> OrderBy {
+            .init(field: field, ascending: false)
+        }
+        /// Smallest value first (oldest date, lowest number).
+        public static func ascending(_ field: String) -> OrderBy {
+            .init(field: field, ascending: true)
+        }
+    }
+
     /// When searches start observing new commits.
     public enum ReloadPolicy: Sendable {
         /// Only after an explicit `reload()` (or `commitAndReload()` / the
@@ -111,9 +129,11 @@ public final class Index: @unchecked Sendable {
     ///   - highlight: stored text fields to produce highlighted snippets for
     ///     (`SearchHit.snippet(_:)`). Empty → no snippets.
     ///   - snippetMaxChars: max snippet length (0 → tantivy default).
+    ///   - orderBy: sort hits by a numeric/date fast field instead of relevance
+    ///     (e.g. `.descending("created")`). `nil` → best match first.
     public func search(
         _ query: String, limit: Int = 10, fields: [String] = [], boosts: [String: Double] = [:],
-        highlight: [String] = [], snippetMaxChars: Int = 0
+        highlight: [String] = [], snippetMaxChars: Int = 0, orderBy: OrderBy? = nil
     ) throws(TantivyError) -> [SearchHit] {
         try Self.validateQueryString(query)
         try Self.validateNonNegative(limit, "limit")
@@ -127,7 +147,11 @@ public final class Index: @unchecked Sendable {
                 withOptionalCString(csv) { fC in
                     withOptionalCString(boostsJSON) { bC in
                         withOptionalCString(snipCSV) { sC in
-                            tantivy_index_search(handle, qC, fC, bC, sC, snippetMaxChars, limit, &err)
+                            withOptionalCString(orderBy?.field ?? "") { oC in
+                                tantivy_index_search(
+                                    handle, qC, fC, bC, sC, snippetMaxChars, limit,
+                                    oC, orderBy?.ascending == true ? 1 : 0, &err)
+                            }
                         }
                     }
                 }
@@ -142,8 +166,11 @@ public final class Index: @unchecked Sendable {
     /// - Parameters:
     ///   - highlight: stored text fields to produce highlighted snippets for.
     ///   - snippetMaxChars: max snippet length (0 → tantivy default).
+    ///   - orderBy: sort hits by a numeric/date fast field instead of relevance
+    ///     (e.g. `.descending("created")`). `nil` → best match first.
     public func search(
-        _ query: Query, limit: Int = 10, highlight: [String] = [], snippetMaxChars: Int = 0
+        _ query: Query, limit: Int = 10, highlight: [String] = [], snippetMaxChars: Int = 0,
+        orderBy: OrderBy? = nil
     ) throws(TantivyError) -> [SearchHit] {
         try Self.validateNonNegative(limit, "limit")
         try Self.validateNonNegative(snippetMaxChars, "snippetMaxChars")
@@ -153,7 +180,11 @@ public final class Index: @unchecked Sendable {
         let raw: UnsafeMutablePointer<CChar>? =
             qjson.withCString { qC in
                 withOptionalCString(snipCSV) { sC in
-                    tantivy_index_search_query(handle, qC, sC, snippetMaxChars, limit, &err)
+                    withOptionalCString(orderBy?.field ?? "") { oC in
+                        tantivy_index_search_query(
+                            handle, qC, sC, snippetMaxChars, limit,
+                            oC, orderBy?.ascending == true ? 1 : 0, &err)
+                    }
                 }
             }
         guard let raw else { throw TantivyError.take(&err, fallback: "search failed") }

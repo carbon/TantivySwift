@@ -91,7 +91,10 @@ int tantivy_writer_delete_query(CWriter *writer,
  */
 /* snippet_fields_csv: comma-separated stored text fields to highlight (NULL/empty
  * = none); snippet_max_chars: 0 = default. When set, each hit gains a "snippets"
- * map {field: highlighted-HTML}. */
+ * map {field: highlighted-HTML}.
+ * order_by_field: NULL/empty = relevance order; otherwise sort by that numeric/
+ * date fast field (order_ascending non-zero = ascending). Field-ordered hits
+ * carry score 0. */
 char *tantivy_index_search(CIndex *index,
                            const char *query,
                            const char *default_fields_csv,
@@ -99,6 +102,8 @@ char *tantivy_index_search(CIndex *index,
                            const char *snippet_fields_csv,
                            size_t snippet_max_chars,
                            size_t limit,
+                           const char *order_by_field,
+                           int order_ascending,
                            char **out_error);
 
 /*
@@ -112,6 +117,8 @@ char *tantivy_index_search_query(CIndex *index,
                                  const char *snippet_fields_csv,
                                  size_t snippet_max_chars,
                                  size_t limit,
+                                 const char *order_by_field,
+                                 int order_ascending,
                                  char **out_error);
 
 /*

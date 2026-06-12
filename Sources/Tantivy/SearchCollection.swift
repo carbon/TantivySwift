@@ -109,9 +109,11 @@ public final class SearchCollection<Model: Codable>: @unchecked Sendable {
 
     /// Search and decode matches into `Model`.
     public func search(
-        _ query: String, limit: Int = 10, fields: [String] = [], boosts: [String: Double] = [:]
+        _ query: String, limit: Int = 10, fields: [String] = [], boosts: [String: Double] = [:],
+        orderBy: Index.OrderBy? = nil
     ) throws -> [Model] {
-        try index.search(query, as: Model.self, limit: limit, fields: fields, boosts: boosts)
+        try index.search(
+            query, as: Model.self, limit: limit, fields: fields, boosts: boosts, orderBy: orderBy)
     }
 
     /// Search and return each match together with its relevance score.

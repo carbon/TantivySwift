@@ -34,6 +34,60 @@ struct ConcurrencyAndLifecycleTests {
         #expect(passes.count == iterations)
     }
 
+    /// The docs' core concurrency claim, under load: one task writes batches
+    /// (writer commits + reloads), while several tasks hammer every read path —
+    /// string search, structured search, count, documentCount, get, facet
+    /// counts — and one also reloads continuously. Readers must never throw or
+    /// crash mid-commit, and the final state must be exactly what was written.
+    @Test func stressConcurrentReadsWritesAndReloads() async throws {
+        let schema = SchemaBuilder()
+            .addStringField("id", stored: true)
+            .addTextField("title", stored: true)
+            .addU64Field("batch", stored: true, fast: true)
+            .build()
+        let index = try Index.inMemory(schema: schema)
+        try index.add(["id": "seed", "title": "dune seed", "batch": 0])
+
+        let batches = 20, perBatch = 10
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            // Single writer task: the (non-Sendable) IndexWriter stays confined
+            // here; each batch is a fresh writer + commit + reload.
+            group.addTask {
+                for b in 1...batches {
+                    try index.write { w in
+                        for i in 0..<perBatch {
+                            try w.addDocument(
+                                ["id": "doc-\(b)-\(i)", "title": "dune chapter \(b)", "batch": b])
+                        }
+                    }
+                }
+            }
+            // Four readers run the full read surface concurrently with the
+            // commits above; reader 0 also reloads on every pass.
+            for r in 0..<4 {
+                group.addTask {
+                    for _ in 0..<150 {
+                        #expect(try index.search("dune", limit: 5).isEmpty == false)
+                        _ = try index.search(
+                            .parsed("dune") && .range("batch", from: .included(.int(0))), limit: 3)
+                        #expect(try index.count("dune") >= 1)
+                        #expect(index.documentCount >= 1)
+                        #expect(try index.get("id", equals: "seed") != nil)
+                        #expect(try index.termCounts("batch", limit: 3).isEmpty == false)
+                        if r == 0 { try index.reload() }
+                    }
+                }
+            }
+            try await group.waitForAll()
+        }
+
+        // Everything written during the storm is present and searchable.
+        try index.reload()
+        #expect(index.documentCount == 1 + batches * perBatch)
+        #expect(try index.count("dune") == 1 + batches * perBatch)
+        #expect(try index.get("id", equals: "doc-\(batches)-\(perBatch - 1)") != nil)
+    }
+
     @Test func writerKeepsItsIndexAlive() throws {
         // The Index local goes out of scope, but the returned writer retains it,
         // so commitAndReload (which calls back into the index) stays valid.
