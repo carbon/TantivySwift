@@ -145,6 +145,19 @@ struct AggregationTests {
         #expect(byAuthor == ["John Steinbeck": 2, "Jane Austen": 1])
     }
 
+    /// Case sensitivity of prefix type-ahead on a raw `string` field: the value
+    /// is stored verbatim, so a lowercase prefix does NOT match a capitalized
+    /// name — only an exactly-cased prefix does.
+    @Test func prefixTypeAheadIsCaseSensitiveOnRawString() throws {
+        let schema = SchemaBuilder()
+            .addStringField("author", stored: true, fast: true)
+            .build()
+        let index = try Index.inMemory(schema: schema)
+        try index.add(Document(["author": "John Steinbeck"]))
+        #expect(try index.termCounts("author", matching: .prefix("author", "j")).isEmpty)
+        #expect(try index.termCounts("author", matching: .prefix("author", "J")).count == 1)
+    }
+
     @Test func collectionTermCounts() throws {
         struct Book: Codable { let title: String; let tag: String }
         let books = SearchCollection<Book>(index: try corpus())
