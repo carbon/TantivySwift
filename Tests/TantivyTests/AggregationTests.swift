@@ -117,6 +117,34 @@ struct AggregationTests {
         #expect(byAuthor == ["Hemingway": 1, "Steinbeck": 1])
     }
 
+    /// The type-ahead path: a `.prefix` query scopes which documents are
+    /// counted, so `termCounts` returns just the authors whose names start with
+    /// what the user has typed, each with its document count. The prefix is
+    /// matched against the raw (un-analyzed) `string` token, so it is
+    /// case-sensitive — lowercase the input and use a `.tag`-analyzed field for
+    /// case-insensitive type-ahead.
+    @Test func prefixScopedTermCountsForTypeAhead() throws {
+        let schema = SchemaBuilder()
+            .addTextField("title", stored: true)
+            .addStringField("author", stored: true, fast: true)
+            .build()
+        let index = try Index.inMemory(schema: schema)
+        try index.add(contentsOf: [
+            Document(["title": "East of Eden", "author": "John Steinbeck"]),
+            Document(["title": "The Grapes of Wrath", "author": "John Steinbeck"]),
+            Document(["title": "Pride and Prejudice", "author": "Jane Austen"]),
+            Document(["title": "The Old Man and the Sea", "author": "Ernest Hemingway"]),
+        ])
+
+        let counts = try index.termCounts("author", matching: .prefix("author", "J"))
+        let byAuthor = Dictionary(
+            uniqueKeysWithValues: counts.compactMap { c -> (String, Int)? in
+                if case .string(let s) = c.value { return (s, c.count) } else { return nil }
+            })
+        // Only "J…" authors surface; Hemingway (starts with E) is excluded.
+        #expect(byAuthor == ["John Steinbeck": 2, "Jane Austen": 1])
+    }
+
     @Test func collectionTermCounts() throws {
         struct Book: Codable { let title: String; let tag: String }
         let books = SearchCollection<Book>(index: try corpus())
