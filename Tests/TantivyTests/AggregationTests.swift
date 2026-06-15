@@ -68,6 +68,55 @@ struct AggregationTests {
         }
     }
 
+    /// A multi-valued fast string field — the "an object can have several
+    /// authors" case. Each value of a document contributes to its own bucket, so
+    /// a co-authored document is counted once under each author.
+    @Test func termCountsOverMultiValuedField() throws {
+        let schema = SchemaBuilder()
+            .addTextField("title", stored: true)
+            .addStringField("author", stored: true, fast: true)
+            .build()
+        let index = try Index.inMemory(schema: schema)
+        try index.add(contentsOf: [
+            Document(["title": "Solo", "author": .array(["Ernest Hemingway"])]),
+            Document(["title": "Co-authored",
+                      "author": .array(["Ernest Hemingway", "John Steinbeck"])]),
+            Document(["title": "Other", "author": .array(["Herman Melville"])]),
+        ])
+
+        let counts = try index.termCounts("author")
+        let byAuthor = Dictionary(
+            uniqueKeysWithValues: counts.compactMap { c -> (String, Int)? in
+                if case .string(let s) = c.value { return (s, c.count) } else { return nil }
+            })
+        // A `string` field keeps each multi-word name as ONE bucket — no
+        // tokenization into "John"/"Steinbeck". Hemingway appears in two docs.
+        #expect(byAuthor == [
+            "Ernest Hemingway": 2, "John Steinbeck": 1, "Herman Melville": 1,
+        ])
+    }
+
+    /// Multi-valued counts also honour the matching query: only documents the
+    /// query selects contribute their authors.
+    @Test func termCountsOverMultiValuedFieldRespectsQuery() throws {
+        let schema = SchemaBuilder()
+            .addTextField("title", stored: true)
+            .addStringField("author", stored: true, fast: true)
+            .build()
+        let index = try Index.inMemory(schema: schema)
+        try index.add(contentsOf: [
+            Document(["title": "Solo", "author": .array(["Hemingway"])]),
+            Document(["title": "Co-authored", "author": .array(["Hemingway", "Steinbeck"])]),
+        ])
+
+        let counts = try index.termCounts("author", matching: .parsed("co-authored"))
+        let byAuthor = Dictionary(
+            uniqueKeysWithValues: counts.compactMap { c -> (String, Int)? in
+                if case .string(let s) = c.value { return (s, c.count) } else { return nil }
+            })
+        #expect(byAuthor == ["Hemingway": 1, "Steinbeck": 1])
+    }
+
     @Test func collectionTermCounts() throws {
         struct Book: Codable { let title: String; let tag: String }
         let books = SearchCollection<Book>(index: try corpus())
