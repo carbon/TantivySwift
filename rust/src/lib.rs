@@ -40,10 +40,8 @@ use tantivy::schema::{
     TextFieldIndexing, TextOptions,
 };
 use tantivy::snippet::SnippetGenerator;
-use tantivy::tokenizer::{
-    Language, LowerCaser, RawTokenizer, RemoveLongFilter, SimpleTokenizer, Stemmer, TextAnalyzer,
-};
-use tantivy::{DateTime, Index, IndexReader, IndexWriter, ReloadPolicy};
+use tantivy::tokenizer::{LowerCaser, RawTokenizer, TextAnalyzer};
+use tantivy::{DateTime, Index, IndexReader, IndexWriter, Order, ReloadPolicy};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -212,22 +210,20 @@ fn build_schema(spec: &str) -> Result<Schema, String> {
 /// tokenizer manager, so they must be re-registered every time an index is
 /// opened — the schema only persists the tokenizer *name* per field.
 ///
-///  * `en`  — alias of `en_stem` (lowercased, English-stemmed full text)
-///  * `tag` — one lowercased token per value, for case-insensitive tags / enums
+///  * `lowercase` — one lowercased token per value, for case-insensitive exact
+///                  match (tags, authors, enums, ids)
 fn register_analyzers(index: &Index) {
-    let manager = index.tokenizers();
-
-    let en = TextAnalyzer::builder(SimpleTokenizer::default())
-        .filter(RemoveLongFilter::limit(40))
-        .filter(LowerCaser)
-        .filter(Stemmer::new(Language::English))
-        .build();
-    manager.register("en", en);
-
-    let tag = TextAnalyzer::builder(RawTokenizer::default())
+    let lowercase = TextAnalyzer::builder(RawTokenizer::default())
         .filter(LowerCaser)
         .build();
-    manager.register("tag", tag);
+
+    // Register into BOTH the indexing/search tokenizer manager and the
+    // fast-field tokenizer manager. A `fast: true` text field builds its
+    // columnar values through the latter, which otherwise knows only tantivy's
+    // built-ins and fails at commit with `Tokenizer "<name>" not found`.
+    for manager in [index.tokenizers(), index.fast_field_tokenizer()] {
+        manager.register("lowercase", lowercase.clone());
+    }
 }
 
 /// All indexed text fields — used as the query parser's default fields when the
@@ -585,6 +581,8 @@ fn parse_string_query(
         .map_err(|e| format!("could not parse query: {e}"))
 }
 
+/// `order_by_field` non-null/non-empty sorts hits by that fast field instead of
+/// relevance (`order_ascending` non-zero -> ascending); such hits carry score 0.
 #[no_mangle]
 pub extern "C" fn tantivy_index_search(
     index: *mut CIndex,
@@ -594,6 +592,8 @@ pub extern "C" fn tantivy_index_search(
     snippet_fields_csv: *const c_char,
     snippet_max_chars: usize,
     limit: usize,
+    order_by_field: *const c_char,
+    order_ascending: c_int,
     out_error: *mut *mut c_char,
 ) -> *mut c_char {
     guard(out_error, ptr::null_mut(), || {
@@ -606,7 +606,10 @@ pub extern "C" fn tantivy_index_search(
             unsafe { opt_str(boosts_json) },
         )?;
         let snippet_fields = resolve_fields_csv(&idx.schema, unsafe { opt_str(snippet_fields_csv) })?;
-        execute_search(idx, &*parsed, limit, &snippet_fields, snippet_max_chars)
+        let order_by = unsafe { opt_str(order_by_field) }
+            .filter(|s| !s.is_empty())
+            .map(|f| (f, order_ascending != 0));
+        execute_search(idx, &*parsed, limit, &snippet_fields, snippet_max_chars, order_by)
     })
 }
 
@@ -676,12 +679,17 @@ fn resolve_fields_csv(schema: &Schema, csv: Option<&str>) -> Result<Vec<Field>, 
 ///
 /// When `snippet_fields` is non-empty, each hit gets a `snippets` map of
 /// `{field: highlighted-HTML}` generated from that field's stored text.
+///
+/// `order_by` replaces relevance ordering with a fast-field sort: `(field,
+/// ascending)`. Field-ordered hits carry a score of 0 (tantivy returns the
+/// sort key instead of computing BM25).
 fn execute_search(
     idx: &CIndex,
     query: &dyn Query,
     limit: usize,
     snippet_fields: &[Field],
     snippet_max_chars: usize,
+    order_by: Option<(&str, bool)>,
 ) -> Result<*mut c_char, String> {
     let searcher = idx.reader.searcher();
 
@@ -699,9 +707,55 @@ fn execute_search(
     // bug) cannot make TopDocs preallocate and panic; results are unaffected.
     let limit = if limit == 0 { 10 } else { limit };
     let limit = limit.min(searcher.num_docs().max(1) as usize);
-    let top = searcher
-        .search(query, &TopDocs::with_limit(limit).order_by_score())
-        .map_err(|e| format!("search failed: {e}"))?;
+    let top: Vec<(f32, tantivy::DocAddress)> = match order_by {
+        None => searcher
+            .search(query, &TopDocs::with_limit(limit).order_by_score())
+            .map_err(|e| format!("search failed: {e}"))?,
+        Some((name, ascending)) => {
+            // The sort key type must match the fast column's type, so dispatch
+            // on the schema. Each arm discards the key and keeps doc order.
+            let field = idx
+                .schema
+                .get_field(name)
+                .map_err(|_| format!("unknown order-by field: '{name}'"))?;
+            let order = if ascending { Order::Asc } else { Order::Desc };
+            let collect = |e: tantivy::TantivyError| format!("ordered search failed: {e}");
+            match idx.schema.get_field_entry(field).field_type() {
+                FieldType::U64(_) => searcher
+                    .search(query, &TopDocs::with_limit(limit).order_by_fast_field::<u64>(name, order))
+                    .map_err(collect)?
+                    .into_iter()
+                    .map(|(_, a)| (0.0, a))
+                    .collect(),
+                FieldType::I64(_) => searcher
+                    .search(query, &TopDocs::with_limit(limit).order_by_fast_field::<i64>(name, order))
+                    .map_err(collect)?
+                    .into_iter()
+                    .map(|(_, a)| (0.0, a))
+                    .collect(),
+                FieldType::F64(_) => searcher
+                    .search(query, &TopDocs::with_limit(limit).order_by_fast_field::<f64>(name, order))
+                    .map_err(collect)?
+                    .into_iter()
+                    .map(|(_, a)| (0.0, a))
+                    .collect(),
+                FieldType::Date(_) => searcher
+                    .search(
+                        query,
+                        &TopDocs::with_limit(limit).order_by_fast_field::<DateTime>(name, order),
+                    )
+                    .map_err(collect)?
+                    .into_iter()
+                    .map(|(_, a)| (0.0, a))
+                    .collect(),
+                _ => {
+                    return Err(format!(
+                        "order-by requires a numeric or date fast field; '{name}' is not one"
+                    ))
+                }
+            }
+        }
+    };
 
     let mut hits = Vec::with_capacity(top.len());
     for (score, addr) in top {
@@ -999,6 +1053,9 @@ fn build_query(
 /// Run a structured query (see the JSON grammar above) and return the top
 /// `limit` hits as the same JSON envelope as `tantivy_index_search`.
 ///
+/// `order_by_field` non-null/non-empty sorts hits by that fast field instead of
+/// relevance (`order_ascending` non-zero -> ascending); such hits carry score 0.
+///
 /// Returns a heap C string (free with `tantivy_string_free`), or null on error.
 #[no_mangle]
 pub extern "C" fn tantivy_index_search_query(
@@ -1007,6 +1064,8 @@ pub extern "C" fn tantivy_index_search_query(
     snippet_fields_csv: *const c_char,
     snippet_max_chars: usize,
     limit: usize,
+    order_by_field: *const c_char,
+    order_ascending: c_int,
     out_error: *mut *mut c_char,
 ) -> *mut c_char {
     guard(out_error, ptr::null_mut(), || {
@@ -1017,7 +1076,10 @@ pub extern "C" fn tantivy_index_search_query(
         let query = build_query(&idx.index, &idx.schema, &tree)?;
 
         let snippet_fields = resolve_fields_csv(&idx.schema, unsafe { opt_str(snippet_fields_csv) })?;
-        execute_search(idx, &*query, limit, &snippet_fields, snippet_max_chars)
+        let order_by = unsafe { opt_str(order_by_field) }
+            .filter(|s| !s.is_empty())
+            .map(|f| (f, order_ascending != 0));
+        execute_search(idx, &*query, limit, &snippet_fields, snippet_max_chars, order_by)
     })
 }
 

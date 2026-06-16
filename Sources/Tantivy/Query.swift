@@ -282,15 +282,17 @@ extension Query {
 
 extension Index {
     /// Run a structured ``Query`` and decode each hit into `T`.
-    public func search<T: Decodable>(_ query: Query, as type: T.Type, limit: Int = 10) throws -> [T] {
-        try search(query, limit: limit).map { try $0.decode(T.self) }
+    public func search<T: Decodable>(
+        _ query: Query, as type: T.Type, limit: Int = 10, orderBy: OrderBy? = nil
+    ) throws -> [T] {
+        try search(query, limit: limit, orderBy: orderBy).map { try $0.decode(T.self) }
     }
 }
 
 extension SearchCollection {
     /// Run a structured ``Query`` and decode matches into `Model`.
-    public func search(_ query: Query, limit: Int = 10) throws -> [Model] {
-        try index.search(query, as: Model.self, limit: limit)
+    public func search(_ query: Query, limit: Int = 10, orderBy: Index.OrderBy? = nil) throws -> [Model] {
+        try index.search(query, as: Model.self, limit: limit, orderBy: orderBy)
     }
     /// Structured ``Query`` with relevance scores.
     public func searchScored(_ query: Query, limit: Int = 10) throws -> [(score: Float, model: Model)] {

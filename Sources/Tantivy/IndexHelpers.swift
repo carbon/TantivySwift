@@ -53,9 +53,10 @@ extension Index {
     /// field's first value; array properties read all of them.
     public func search<T: Decodable>(
         _ query: String, as type: T.Type, limit: Int = 10,
-        fields: [String] = [], boosts: [String: Double] = [:]
+        fields: [String] = [], boosts: [String: Double] = [:], orderBy: OrderBy? = nil
     ) throws -> [T] {
-        try search(query, limit: limit, fields: fields, boosts: boosts).map { try $0.decode(T.self) }
+        try search(query, limit: limit, fields: fields, boosts: boosts, orderBy: orderBy)
+            .map { try $0.decode(T.self) }
     }
 
     /// Replace any documents whose `idField` equals `id`, then add `document` —

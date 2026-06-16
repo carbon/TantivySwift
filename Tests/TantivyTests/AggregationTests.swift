@@ -68,6 +68,121 @@ struct AggregationTests {
         }
     }
 
+    /// A multi-valued fast string field — the "an object can have several
+    /// authors" case. Each value of a document contributes to its own bucket, so
+    /// a co-authored document is counted once under each author.
+    @Test func termCountsOverMultiValuedField() throws {
+        let schema = SchemaBuilder()
+            .addTextField("title", stored: true)
+            .addStringField("author", stored: true, fast: true)
+            .build()
+        let index = try Index.inMemory(schema: schema)
+        try index.add(contentsOf: [
+            Document(["title": "Solo", "author": .array(["Ernest Hemingway"])]),
+            Document(["title": "Co-authored",
+                      "author": .array(["Ernest Hemingway", "John Steinbeck"])]),
+            Document(["title": "Other", "author": .array(["Herman Melville"])]),
+        ])
+
+        let counts = try index.termCounts("author")
+        let byAuthor = Dictionary(
+            uniqueKeysWithValues: counts.compactMap { c -> (String, Int)? in
+                if case .string(let s) = c.value { return (s, c.count) } else { return nil }
+            })
+        // A `string` field keeps each multi-word name as ONE bucket — no
+        // tokenization into "John"/"Steinbeck". Hemingway appears in two docs.
+        #expect(byAuthor == [
+            "Ernest Hemingway": 2, "John Steinbeck": 1, "Herman Melville": 1,
+        ])
+    }
+
+    /// Multi-valued counts also honour the matching query: only documents the
+    /// query selects contribute their authors.
+    @Test func termCountsOverMultiValuedFieldRespectsQuery() throws {
+        let schema = SchemaBuilder()
+            .addTextField("title", stored: true)
+            .addStringField("author", stored: true, fast: true)
+            .build()
+        let index = try Index.inMemory(schema: schema)
+        try index.add(contentsOf: [
+            Document(["title": "Solo", "author": .array(["Hemingway"])]),
+            Document(["title": "Co-authored", "author": .array(["Hemingway", "Steinbeck"])]),
+        ])
+
+        let counts = try index.termCounts("author", matching: .parsed("co-authored"))
+        let byAuthor = Dictionary(
+            uniqueKeysWithValues: counts.compactMap { c -> (String, Int)? in
+                if case .string(let s) = c.value { return (s, c.count) } else { return nil }
+            })
+        #expect(byAuthor == ["Hemingway": 1, "Steinbeck": 1])
+    }
+
+    /// The type-ahead path: a `.prefix` query scopes which documents are
+    /// counted, so `termCounts` returns just the authors whose names start with
+    /// what the user has typed, each with its document count. The prefix is
+    /// matched against the raw (un-analyzed) `string` token, so it is
+    /// case-sensitive — lowercase the input and use a `.lowercase`-analyzed field
+    /// for case-insensitive type-ahead.
+    @Test func prefixScopedTermCountsForTypeAhead() throws {
+        let schema = SchemaBuilder()
+            .addTextField("title", stored: true)
+            .addStringField("author", stored: true, fast: true)
+            .build()
+        let index = try Index.inMemory(schema: schema)
+        try index.add(contentsOf: [
+            Document(["title": "East of Eden", "author": "John Steinbeck"]),
+            Document(["title": "The Grapes of Wrath", "author": "John Steinbeck"]),
+            Document(["title": "Pride and Prejudice", "author": "Jane Austen"]),
+            Document(["title": "The Old Man and the Sea", "author": "Ernest Hemingway"]),
+        ])
+
+        let counts = try index.termCounts("author", matching: .prefix("author", "J"))
+        let byAuthor = Dictionary(
+            uniqueKeysWithValues: counts.compactMap { c -> (String, Int)? in
+                if case .string(let s) = c.value { return (s, c.count) } else { return nil }
+            })
+        // Only "J…" authors surface; Hemingway (starts with E) is excluded.
+        #expect(byAuthor == ["John Steinbeck": 2, "Jane Austen": 1])
+    }
+
+    /// Case sensitivity of prefix type-ahead on a raw `string` field: the value
+    /// is stored verbatim, so a lowercase prefix does NOT match a capitalized
+    /// name — only an exactly-cased prefix does. For case-insensitive type-ahead
+    /// use a `.lowercase`-analyzed fast text field instead (next test).
+    @Test func prefixTypeAheadIsCaseSensitiveOnRawString() throws {
+        let schema = SchemaBuilder()
+            .addStringField("author", stored: true, fast: true)
+            .build()
+        let index = try Index.inMemory(schema: schema)
+        try index.add(Document(["author": "John Steinbeck"]))
+        #expect(try index.termCounts("author", matching: .prefix("author", "j")).isEmpty)
+        #expect(try index.termCounts("author", matching: .prefix("author", "J")).count == 1)
+    }
+
+    /// Case-INsensitive type-ahead: a `.lowercase`-analyzed text field stores one
+    /// lowercased token per value, so a lowercase prefix matches. This requires
+    /// the custom analyzer to be registered in the fast-field tokenizer manager
+    /// (it is `fast: true`); the bucket key is the lowercased name, so keep a
+    /// separate stored field for display.
+    @Test func prefixTypeAheadCaseInsensitiveOnLowercaseFastField() throws {
+        let schema = SchemaBuilder()
+            .addTextField("author", stored: true, tokenizer: .lowercase, fast: true)
+            .build()
+        let index = try Index.inMemory(schema: schema)
+        try index.add(contentsOf: [
+            Document(["author": "John Steinbeck"]),
+            Document(["author": "Jane Austen"]),
+            Document(["author": "Ernest Hemingway"]),
+        ])
+        // Lowercase "j" now matches both "John…" and "Jane…"; buckets are lowercased.
+        let counts = try index.termCounts("author", matching: .prefix("author", "j"))
+        let byAuthor = Dictionary(
+            uniqueKeysWithValues: counts.compactMap { c -> (String, Int)? in
+                if case .string(let s) = c.value { return (s, c.count) } else { return nil }
+            })
+        #expect(byAuthor == ["john steinbeck": 1, "jane austen": 1])
+    }
+
     @Test func collectionTermCounts() throws {
         struct Book: Codable { let title: String; let tag: String }
         let books = SearchCollection<Book>(index: try corpus())

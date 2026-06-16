@@ -33,8 +33,10 @@ public enum Analyzer: String, Sendable, CaseIterable {
     case whitespace = "whitespace"
     /// Lowercased + English stemming (tantivy `en_stem`).
     case english = "en_stem"
-    /// The whole value as one **lowercased** token — case-insensitive tags/enums.
-    case tag = "tag"
+    /// The whole value as one **lowercased** token — case-insensitive exact
+    /// match for tags, authors, enums, ids. (Formerly named `tag`; the `tag`
+    /// tokenizer remains registered natively so older indexes still open.)
+    case lowercase = "lowercase"
 }
 
 /// Fluent builder for an index `Schema`.
