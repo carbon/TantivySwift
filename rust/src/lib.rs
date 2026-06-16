@@ -40,9 +40,7 @@ use tantivy::schema::{
     TextFieldIndexing, TextOptions,
 };
 use tantivy::snippet::SnippetGenerator;
-use tantivy::tokenizer::{
-    Language, LowerCaser, RawTokenizer, RemoveLongFilter, SimpleTokenizer, Stemmer, TextAnalyzer,
-};
+use tantivy::tokenizer::{LowerCaser, RawTokenizer, TextAnalyzer};
 use tantivy::{DateTime, Index, IndexReader, IndexWriter, Order, ReloadPolicy};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -212,16 +210,9 @@ fn build_schema(spec: &str) -> Result<Schema, String> {
 /// tokenizer manager, so they must be re-registered every time an index is
 /// opened — the schema only persists the tokenizer *name* per field.
 ///
-///  * `en`        — alias of `en_stem` (lowercased, English-stemmed full text)
 ///  * `lowercase` — one lowercased token per value, for case-insensitive exact
 ///                  match (tags, authors, enums, ids)
 fn register_analyzers(index: &Index) {
-    let en = TextAnalyzer::builder(SimpleTokenizer::default())
-        .filter(RemoveLongFilter::limit(40))
-        .filter(LowerCaser)
-        .filter(Stemmer::new(Language::English))
-        .build();
-
     let lowercase = TextAnalyzer::builder(RawTokenizer::default())
         .filter(LowerCaser)
         .build();
@@ -231,7 +222,6 @@ fn register_analyzers(index: &Index) {
     // columnar values through the latter, which otherwise knows only tantivy's
     // built-ins and fails at commit with `Tokenizer "<name>" not found`.
     for manager in [index.tokenizers(), index.fast_field_tokenizer()] {
-        manager.register("en", en.clone());
         manager.register("lowercase", lowercase.clone());
     }
 }
