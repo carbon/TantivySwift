@@ -121,8 +121,8 @@ struct AggregationTests {
     /// counted, so `termCounts` returns just the authors whose names start with
     /// what the user has typed, each with its document count. The prefix is
     /// matched against the raw (un-analyzed) `string` token, so it is
-    /// case-sensitive — lowercase the input and use a `.tag`-analyzed field for
-    /// case-insensitive type-ahead.
+    /// case-sensitive — lowercase the input and use a `.lowercase`-analyzed field
+    /// for case-insensitive type-ahead.
     @Test func prefixScopedTermCountsForTypeAhead() throws {
         let schema = SchemaBuilder()
             .addTextField("title", stored: true)
@@ -147,7 +147,8 @@ struct AggregationTests {
 
     /// Case sensitivity of prefix type-ahead on a raw `string` field: the value
     /// is stored verbatim, so a lowercase prefix does NOT match a capitalized
-    /// name — only an exactly-cased prefix does.
+    /// name — only an exactly-cased prefix does. For case-insensitive type-ahead
+    /// use a `.lowercase`-analyzed fast text field instead (next test).
     @Test func prefixTypeAheadIsCaseSensitiveOnRawString() throws {
         let schema = SchemaBuilder()
             .addStringField("author", stored: true, fast: true)
@@ -156,6 +157,30 @@ struct AggregationTests {
         try index.add(Document(["author": "John Steinbeck"]))
         #expect(try index.termCounts("author", matching: .prefix("author", "j")).isEmpty)
         #expect(try index.termCounts("author", matching: .prefix("author", "J")).count == 1)
+    }
+
+    /// Case-INsensitive type-ahead: a `.lowercase`-analyzed text field stores one
+    /// lowercased token per value, so a lowercase prefix matches. This requires
+    /// the custom analyzer to be registered in the fast-field tokenizer manager
+    /// (it is `fast: true`); the bucket key is the lowercased name, so keep a
+    /// separate stored field for display.
+    @Test func prefixTypeAheadCaseInsensitiveOnLowercaseFastField() throws {
+        let schema = SchemaBuilder()
+            .addTextField("author", stored: true, tokenizer: .lowercase, fast: true)
+            .build()
+        let index = try Index.inMemory(schema: schema)
+        try index.add(contentsOf: [
+            Document(["author": "John Steinbeck"]),
+            Document(["author": "Jane Austen"]),
+            Document(["author": "Ernest Hemingway"]),
+        ])
+        // Lowercase "j" now matches both "John…" and "Jane…"; buckets are lowercased.
+        let counts = try index.termCounts("author", matching: .prefix("author", "j"))
+        let byAuthor = Dictionary(
+            uniqueKeysWithValues: counts.compactMap { c -> (String, Int)? in
+                if case .string(let s) = c.value { return (s, c.count) } else { return nil }
+            })
+        #expect(byAuthor == ["john steinbeck": 1, "jane austen": 1])
     }
 
     @Test func collectionTermCounts() throws {

@@ -63,9 +63,9 @@ struct FeatureTests {
 
     // MARK: - Named analyzers
 
-    @Test func tagAnalyzerIsLowercasedSingleToken() throws {
+    @Test func lowercaseAnalyzerIsLowercasedSingleToken() throws {
         let schema = SchemaBuilder()
-            .addTextField("tags", stored: true, tokenizer: .tag)
+            .addTextField("tags", stored: true, tokenizer: .lowercase)
             .build()
         let index = try Index.inMemory(schema: schema)
         try index.add(["tags": ["Property", "House Rental"]])

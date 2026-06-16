@@ -114,7 +114,7 @@ what the native layer registers (a drift-guard test enforces this):
 | `.default` | lowercased, split on non-alphanumeric, unstemmed |
 | `.english` | `.default` + English stemming (tantivy `en_stem`) |
 | `.raw` | the whole value as one token, **case-sensitive** (exact match) |
-| `.tag` | the whole value as one **lowercased** token (case-insensitive tags/enums) |
+| `.lowercase` | the whole value as one **lowercased** token (case-insensitive exact match: tags, authors, enums, ids) |
 | `.whitespace` | split on whitespace only |
 
 ```swift

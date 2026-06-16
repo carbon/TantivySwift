@@ -10,7 +10,7 @@ struct AnalyzerRegistrationTests {
         #expect(Analyzer.raw.rawValue == "raw")
         #expect(Analyzer.whitespace.rawValue == "whitespace")
         #expect(Analyzer.english.rawValue == "en_stem")
-        #expect(Analyzer.tag.rawValue == "tag")
+        #expect(Analyzer.lowercase.rawValue == "lowercase")
         #expect(Analyzer.allCases.count == 5)
     }
 
