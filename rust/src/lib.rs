@@ -518,6 +518,107 @@ pub extern "C" fn tantivy_writer_delete_query(
 }
 
 // ---------------------------------------------------------------------------
+// Maintenance
+// ---------------------------------------------------------------------------
+
+/// Merge all searchable segments into a single segment ("optimize" /
+/// compaction). Reclaims space held by deleted documents and speeds up searches
+/// on an index that has accumulated many small segments. Blocks until the merge
+/// finishes. No-op when there are fewer than two segments. Requires the
+/// single-writer lock. Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn tantivy_writer_merge(writer: *mut CWriter, out_error: *mut *mut c_char) -> c_int {
+    guard(out_error, -1, || {
+        let w = unsafe { writer.as_mut() }.ok_or("writer handle is null")?;
+        let segments = w
+            .writer
+            .index()
+            .searchable_segments()
+            .map_err(|e| format!("could not list segments: {e}"))?;
+        // Merge when there's something to gain: several segments to combine, or a
+        // single segment still carrying deleted documents to expunge (merging it
+        // rewrites the segment without them). Skip the no-op cases.
+        let has_deletes = segments.iter().any(|s| s.meta().num_deleted_docs() > 0);
+        if segments.len() < 2 && !has_deletes {
+            return Ok(0);
+        }
+        let segment_ids: Vec<_> = segments.iter().map(|s| s.id()).collect();
+        w.writer
+            .merge(&segment_ids)
+            .wait()
+            .map_err(|e| format!("merge failed: {e}"))?;
+        Ok(0)
+    })
+}
+
+/// Delete segment files the index no longer references (e.g. left behind by
+/// merges or deletes). Blocks until done. Requires the single-writer lock.
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn tantivy_writer_garbage_collect(
+    writer: *mut CWriter,
+    out_error: *mut *mut c_char,
+) -> c_int {
+    guard(out_error, -1, || {
+        let w = unsafe { writer.as_ref() }.ok_or("writer handle is null")?;
+        w.writer
+            .garbage_collect_files()
+            .wait()
+            .map_err(|e| format!("garbage collect failed: {e}"))?;
+        Ok(0)
+    })
+}
+
+/// Index statistics as a JSON object, reflecting the reader's current view (as
+/// of the last reload):
+///
+///   {"num_docs":100,"num_deleted":5,"max_doc":105,"num_segments":2,
+///    "segments":[{"id":"<uuid>","num_docs":50,"num_deleted":2,"max_doc":52},...]}
+///
+/// `num_docs` is live documents, `num_deleted` documents deleted but not yet
+/// merged away, and `max_doc` the total addressable (live + deleted). A high
+/// `num_deleted` or `num_segments` is the signal to call `tantivy_writer_merge`.
+///
+/// Returns a heap C string (free with `tantivy_string_free`), or null on error.
+#[no_mangle]
+pub extern "C" fn tantivy_index_stats(
+    index: *mut CIndex,
+    out_error: *mut *mut c_char,
+) -> *mut c_char {
+    guard(out_error, ptr::null_mut(), || {
+        let idx = unsafe { index.as_ref() }.ok_or("index handle is null")?;
+        let searcher = idx.reader.searcher();
+        let mut segments = Vec::new();
+        let (mut num_docs, mut num_deleted, mut max_doc) = (0u64, 0u64, 0u64);
+        for reader in searcher.segment_readers() {
+            let nd = reader.num_docs() as u64;
+            let del = reader.num_deleted_docs() as u64;
+            let md = reader.max_doc() as u64;
+            num_docs += nd;
+            num_deleted += del;
+            max_doc += md;
+            segments.push(json!({
+                "id": reader.segment_id().uuid_string(),
+                "num_docs": nd,
+                "num_deleted": del,
+                "max_doc": md,
+            }));
+        }
+        let out = serde_json::to_string(&json!({
+            "num_docs": num_docs,
+            "num_deleted": num_deleted,
+            "max_doc": max_doc,
+            "num_segments": segments.len(),
+            "segments": segments,
+        }))
+        .map_err(|e| format!("could not serialize stats: {e}"))?;
+        CString::new(out)
+            .map(CString::into_raw)
+            .map_err(|_| "result contained interior NUL".to_string())
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Searching
 // ---------------------------------------------------------------------------
 

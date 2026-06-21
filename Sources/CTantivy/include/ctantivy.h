@@ -81,6 +81,29 @@ int tantivy_writer_delete_query(CWriter *writer,
                                 const char *query_json,
                                 char **out_error);
 
+/* ---- maintenance ---- */
+
+/*
+ * Merge all searchable segments into one ("optimize"/compaction): reclaims space
+ * from deleted documents and speeds up search on a fragmented index. Blocks
+ * until done; no-op with fewer than two segments. 0 ok, -1 error.
+ */
+int tantivy_writer_merge(CWriter *writer, char **out_error);
+
+/*
+ * Delete segment files the index no longer references (left by merges/deletes).
+ * Blocks until done. 0 ok, -1 error.
+ */
+int tantivy_writer_garbage_collect(CWriter *writer, char **out_error);
+
+/*
+ * Index statistics (reader's current view) as a JSON object:
+ *   {"num_docs":100,"num_deleted":5,"max_doc":105,"num_segments":2,
+ *    "segments":[{"id":"<uuid>","num_docs":50,"num_deleted":2,"max_doc":52},...]}
+ * Returns a heap string (free with tantivy_string_free), or NULL on error.
+ */
+char *tantivy_index_stats(CIndex *index, char **out_error);
+
 /* ---- searching ---- */
 
 /*

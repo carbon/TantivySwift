@@ -163,6 +163,35 @@ public final class IndexWriter {
         if rc != 0 { throw TantivyError.take(&err, fallback: "delete query failed") }
     }
 
+    // MARK: - Maintenance
+
+    /// Merge all searchable segments into a single segment — "optimize" /
+    /// compaction. This reclaims the space still held by deleted documents and
+    /// speeds up searches on an index that has accumulated many small segments
+    /// (e.g. after lots of small commits). Blocks until the merge finishes, and
+    /// is a no-op when there are fewer than two segments.
+    ///
+    /// Merging is I/O- and CPU-heavy on a large index; run it off the hot path
+    /// (e.g. during idle time), not after every commit. Inspect ``Index/stats()``
+    /// to decide when it's worth it — a high `deletedCount` or `segmentCount` is
+    /// the signal.
+    public func merge() throws(TantivyError) {
+        var err: UnsafeMutablePointer<CChar>?
+        if tantivy_writer_merge(handle, &err) != 0 {
+            throw TantivyError.take(&err, fallback: "merge failed")
+        }
+    }
+
+    /// Delete segment files the index no longer references (left behind by merges
+    /// or deletes). ``merge()`` and commits trigger this automatically; call it
+    /// explicitly to reclaim disk eagerly. Blocks until done.
+    public func garbageCollect() throws(TantivyError) {
+        var err: UnsafeMutablePointer<CChar>?
+        if tantivy_writer_garbage_collect(handle, &err) != 0 {
+            throw TantivyError.take(&err, fallback: "garbage collect failed")
+        }
+    }
+
     private func deleteTerm(field: String, valueJSON: String) throws(TantivyError) {
         var err: UnsafeMutablePointer<CChar>?
         let rc = field.withCString { fC in
