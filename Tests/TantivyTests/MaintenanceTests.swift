@@ -112,4 +112,41 @@ struct MaintenanceTests {
         try index.garbageCollect()       // reclaim them
         #expect(try index.stats().documentCount == 3)
     }
+
+    // MARK: - Persistence
+
+    @Test func statsReflectReopenedIndex() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tantivy-stats-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let schema = SchemaBuilder().addStringField("id", stored: true).build()
+
+        do {
+            let index = try Index(path: dir, schema: schema)
+            try index.add(contentsOf: [["id": "x"], ["id": "y"]])
+        }
+        let reopened = try Index(path: dir, schema: schema)
+        #expect(try reopened.stats().documentCount == 2)
+    }
+
+    @Test func optimizePersistsAcrossReopen() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tantivy-opt-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let schema = SchemaBuilder().addStringField("id", stored: true).build()
+
+        do {
+            let index = try Index(path: dir, schema: schema)
+            for id in ["a", "b", "c", "d"] { try index.add(["id": id]) }   // 4 commits -> 4 segments
+            #expect(try index.stats().segmentCount == 4)
+            try index.optimize()
+            #expect(try index.stats().segmentCount == 1)
+        }
+        // The compaction is durable: a fresh handle sees the single merged segment.
+        let reopened = try Index(path: dir, schema: schema)
+        let s = try reopened.stats()
+        #expect(s.segmentCount == 1)
+        #expect(s.documentCount == 4)
+        #expect(try reopened.get("id", equals: "c") != nil)
+    }
 }

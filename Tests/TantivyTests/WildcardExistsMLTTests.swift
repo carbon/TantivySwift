@@ -162,4 +162,97 @@ struct WildcardExistsMLTTests {
             _ = try index.search(.moreLikeThis("body", "fox", options: opts))
         }
     }
+
+    // MARK: - Cross-API (count / delete / collection)
+
+    @Test func wildcardAndExistsViaCount() throws {
+        let wild = try wildcardCorpus()
+        #expect(try wild.count(.wildcard("title", "re*")) == 2)
+        #expect(try wild.count(.wildcard("code", "AB-*")) == 2)
+
+        let ex = try existsCorpus()
+        #expect(try ex.count(.exists("score")) == 2)
+    }
+
+    /// MoreLikeThis needs scoring enabled, which `count` and `delete` do not
+    /// provide — tantivy rejects it. Pin that limitation so a regression (or a
+    /// future tantivy that lifts it) is noticed; MLT is a `search`-only query.
+    @Test func moreLikeThisRequiresScoringSoCountAndDeleteThrow() throws {
+        let index = try articlesIndex()
+        let q = Query.moreLikeThis("body", "quick brown fox", options: looseMLT)
+        #expect(throws: TantivyError.self) { _ = try index.count(q) }
+        #expect(throws: TantivyError.self) { try index.delete(matching: q) }
+        #expect(try !index.search(q).isEmpty)   // but search works
+    }
+
+    @Test func deleteByWildcard() throws {
+        let index = try wildcardCorpus()
+        try index.delete(matching: .wildcard("code", "AB-*"))   // removes the two AB- codes
+        #expect(index.documentCount == 1)
+        #expect(try index.search(.matchAll).first?.string("code") == "XY-300")
+    }
+
+    @Test func deleteByExists() throws {
+        let index = try existsCorpus()
+        try index.delete(matching: .exists("score"))   // remove docs that have a score
+        #expect(index.documentCount == 1)
+        #expect(try index.search(.matchAll).first?.string("id") == "b")
+    }
+
+    @Test func newQueriesThroughSearchCollection() throws {
+        struct Doc: Codable { let title: String; let n: Int64 }
+        let c = try SearchCollection<Doc> { s in
+            s.addTextField("title", stored: true)
+            s.addI64Field("n", stored: true, indexed: true, fast: true)
+        }
+        try c.add(contentsOf: [Doc(title: "north star", n: 1),
+                               Doc(title: "northern lights", n: 2),
+                               Doc(title: "south pole", n: 3)])
+        #expect(try c.search(.wildcard("title", "north*")).count == 2)
+        #expect(try c.count(matching: .exists("n")) == 3)
+        #expect(try !c.search(.moreLikeThis("title", "northern lights", options: looseMLT)).isEmpty)
+    }
+
+    // MARK: - Error paths
+
+    @Test func unknownFieldThrows() throws {
+        let wild = try wildcardCorpus()
+        #expect(throws: TantivyError.self) { _ = try wild.search(.wildcard("nope", "a*")) }
+
+        let ex = try existsCorpus()
+        #expect(throws: TantivyError.self) { _ = try ex.search(.exists("nope")) }
+
+        let arts = try articlesIndex()
+        #expect(throws: TantivyError.self) {
+            _ = try arts.search(.moreLikeThis("nope", "fox", options: looseMLT))
+        }
+    }
+
+    @Test func moreLikeThisWithNoFieldsThrows() throws {
+        let index = try articlesIndex()
+        #expect(throws: TantivyError.self) {
+            _ = try index.search(.moreLikeThis([:], options: looseMLT))
+        }
+    }
+
+    // MARK: - More-like-this tuning knobs
+
+    @Test func maxQueryTermsNarrowsResults() throws {
+        let index = try articlesIndex()
+        let source = "quick brown fox lazy dog"
+        let wide = try index.search(.moreLikeThis("body", source, options: looseMLT), limit: 10)
+        var narrowOpts = looseMLT
+        narrowOpts.maxQueryTerms = 1
+        let narrow = try index.search(.moreLikeThis("body", source, options: narrowOpts), limit: 10)
+        #expect(narrow.count <= wide.count)
+    }
+
+    @Test func stopWordsExcludeTerms() throws {
+        let index = try articlesIndex()
+        // Stop the only shared distinctive terms → no fox/dog neighbours surface.
+        let opts = MoreLikeThisOptions(minDocFrequency: 1, minTermFrequency: 1,
+                                       stopWords: ["quick", "brown", "fox"])
+        let hits = try index.search(.moreLikeThis("body", "quick brown fox", options: opts))
+        #expect(!titles(hits).contains("Fox Racing"))
+    }
 }

@@ -339,7 +339,8 @@ try index.moreLikeThis(idField: "slug", id: article.slug, fields: ["title", "bod
 > Tune `MoreLikeThisOptions` on small corpora: the defaults (`minDocFrequency`
 > 5, `minTermFrequency` 2) require terms common enough that a tiny index can
 > match nothing — lower them toward `1`. Compared fields must be `stored` for the
-> by-document form.
+> by-document form. `moreLikeThis` is **search-only** — it needs relevance
+> scoring, so `count` and `delete(matching:)` reject it.
 
 #### Facet counts & aggregations
 
