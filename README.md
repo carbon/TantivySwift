@@ -322,6 +322,35 @@ through the raw JSON API:
 let json = try index.aggregate(#"{"avg_year": {"avg": {"field": "year"}}}"#)
 ```
 
+### Maintenance & stats
+
+tantivy writes a new segment per commit and only tombstones deleted/updated
+documents — their space is reclaimed when segments merge. `stats()` reports the
+current layout so you can decide when that's worth doing:
+
+```swift
+let s = try index.stats()
+s.documentCount   // live, searchable documents
+s.deletedCount    // tombstoned (deleted/updated), not yet reclaimed
+s.maxDoc          // live + deleted
+s.segmentCount    // many small segments slow searches
+s.segments        // per-segment [id, documentCount, deletedCount, maxDoc]
+```
+
+`optimize()` merges all segments into one, expunging deleted documents, then
+reloads. It's I/O- and CPU-heavy on a large index and needs the single-writer
+lock, so run it off the hot path (idle time / a maintenance window), guided by
+`stats()`:
+
+```swift
+if s.deletedCount > s.documentCount / 2 || s.segmentCount > 16 {
+    try index.optimize()        // compact + reclaim space
+}
+try index.garbageCollect()      // reclaim files left by merges/deletes
+```
+
+On an open writer the same operations are `writer.merge()` / `writer.garbageCollect()`.
+
 ### Convenience helpers
 
 `Index` has helpers that cut the writer/commit/reload boilerplate and close the
