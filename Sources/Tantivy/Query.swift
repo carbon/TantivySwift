@@ -200,6 +200,9 @@ extension Query {
     /// (`minDocFrequency` 5, `minTermFrequency` 2) can match nothing. To find
     /// documents similar to one already indexed, see
     /// ``Index/moreLikeThis(idField:id:fields:options:limit:)``.
+    ///
+    /// > This query relies on relevance scoring, so it works only with `search`.
+    /// > `count` and `delete(matching:)` run unscored and will throw on it.
     public static func moreLikeThis(
         _ fields: [String: [String]], options: MoreLikeThisOptions = .default
     ) -> Query {
