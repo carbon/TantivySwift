@@ -242,8 +242,8 @@ full `i64` and `u64` ranges (`FieldValue` has both `.int(Int64)` and
 
 A second search API builds a query *tree* that maps directly onto tantivy's own
 query types (`TermQuery`, `PhraseQuery`, `RangeQuery`, `BooleanQuery`,
-`BoostQuery`, `FuzzyTermQuery`, `RegexQuery`, `AllQuery`) — no string parsing,
-no escaping.
+`BoostQuery`, `FuzzyTermQuery`, `RegexQuery`, `ExistsQuery`,
+`MoreLikeThisQuery`, `AllQuery`) — no string parsing, no escaping.
 
 ```swift
 let q: Query =
@@ -259,7 +259,8 @@ Builders: `.matchAll`, `.parsed(query, fields:)`, `.term(field, value)` (string
 / Int / UInt64 / Double / Bool / `date:`), `.phrase(field, [tokens], slop:)`,
 `.phrasePrefix(field, [tokens], maxExpansions:)`, `.fuzzy(field, value,
 distance:…)`, `.prefix(field, value)`, `.autocomplete(field, value,
-typoTolerance:)`, `.regex(field, pattern)`, `.range(field, 1900...2000)` /
+typoTolerance:)`, `.regex(field, pattern)`, `.wildcard(field, pattern)`,
+`.exists(field)`, `.moreLikeThis(field, text)`, `.range(field, 1900...2000)` /
 `.dateRange(field, from:to:)`, `.allOf` / `.anyOf(_, minimumShouldMatch:)`,
 `&&`, `||`, `.excluding(_)`, `.boosted(by:)`.
 
@@ -301,6 +302,44 @@ term is given.
 
 > Like `term`, these match **indexed tokens**: pass an already-analyzed prefix
 > (e.g. lowercase for the `default` tokenizer).
+
+#### Wildcard, exists & more-like-this
+
+`.wildcard` matches a token against a pattern where `*` is any run of characters
+and everything else is literal (so `-`, `.` etc. are safe) — like `.regex` but
+without writing a regex. It matches a single token on a tokenized field, the
+whole value on a `string` field.
+
+```swift
+try index.search(.wildcard("code", "AB-*"))     // whole-value match on a string field
+try index.search(.wildcard("title", "*fish"))   // token suffix on a text field
+```
+
+`.exists` matches documents that have any value in a field — and its negation
+finds the ones missing it. The field must be `fast: true` (it's evaluated over
+the fast column):
+
+```swift
+try index.search(.exists("price"))                          // has a price
+try index.search(.matchAll.excluding(.exists("price")))     // price is missing
+```
+
+`.moreLikeThis` finds documents similar to some text — "related documents". Give
+it field→text(s); tantivy analyzes the text, picks the most characteristic
+terms, and builds a weighted query from them:
+
+```swift
+try index.search(.moreLikeThis("body", article.body), limit: 5)
+
+// Or relative to a document already in the index (reads its stored fields and
+// excludes the source itself):
+try index.moreLikeThis(idField: "slug", id: article.slug, fields: ["title", "body"], limit: 5)
+```
+
+> Tune `MoreLikeThisOptions` on small corpora: the defaults (`minDocFrequency`
+> 5, `minTermFrequency` 2) require terms common enough that a tiny index can
+> match nothing — lower them toward `1`. Compared fields must be `stored` for the
+> by-document form.
 
 #### Facet counts & aggregations
 

@@ -20,11 +20,60 @@ public enum Query: Sendable {
     case term(field: String, value: TermValue)
     case fuzzy(field: String, value: String, distance: UInt8, transposition: Bool, prefix: Bool)
     case regex(field: String, pattern: String)
+    case wildcard(field: String, pattern: String)
+    case exists(field: String)
+    case moreLikeThis(fields: [String: [String]], options: MoreLikeThisOptions)
     case phrase(field: String, terms: [String], slop: UInt32)
     case phrasePrefix(field: String, terms: [String], maxExpansions: UInt32)
     case range(field: String, lower: RangeBound?, upper: RangeBound?)
     indirect case boost(Query, Float)
     indirect case boolean(must: [Query], should: [Query], mustNot: [Query], minimumShouldMatch: Int?)
+}
+
+/// Tuning knobs for ``Query/moreLikeThis(_:options:)`` (tantivy's MoreLikeThis,
+/// modeled on Lucene's). Every value is optional; `nil` keeps tantivy's default.
+///
+/// The two that matter most on small corpora are ``minDocFrequency`` (default 5)
+/// and ``minTermFrequency`` (default 2): a term is only used to find neighbours
+/// if it appears in at least that many documents and that many times in the
+/// source text. On a tiny index these defaults can filter out every term and
+/// return nothing — lower them to `1` to see matches.
+public struct MoreLikeThisOptions: Sendable, Equatable {
+    /// Ignore source terms occurring in fewer than this many documents (default 5).
+    public var minDocFrequency: UInt64?
+    /// Ignore source terms occurring in more than this many documents.
+    public var maxDocFrequency: UInt64?
+    /// Ignore source terms appearing fewer than this many times in the input (default 2).
+    public var minTermFrequency: Int?
+    /// Cap the number of terms in the generated query (default 25).
+    public var maxQueryTerms: Int?
+    /// Ignore source words shorter than this.
+    public var minWordLength: Int?
+    /// Ignore source words longer than this.
+    public var maxWordLength: Int?
+    /// Multiply the per-term boosts the query assigns (default 1.0).
+    public var boostFactor: Float?
+    /// Words to exclude from the source text entirely.
+    public var stopWords: [String]
+
+    public init(
+        minDocFrequency: UInt64? = nil, maxDocFrequency: UInt64? = nil,
+        minTermFrequency: Int? = nil, maxQueryTerms: Int? = nil,
+        minWordLength: Int? = nil, maxWordLength: Int? = nil,
+        boostFactor: Float? = nil, stopWords: [String] = []
+    ) {
+        self.minDocFrequency = minDocFrequency
+        self.maxDocFrequency = maxDocFrequency
+        self.minTermFrequency = minTermFrequency
+        self.maxQueryTerms = maxQueryTerms
+        self.minWordLength = minWordLength
+        self.maxWordLength = maxWordLength
+        self.boostFactor = boostFactor
+        self.stopWords = stopWords
+    }
+
+    /// tantivy's defaults (see the per-property notes).
+    public static var `default`: MoreLikeThisOptions { .init() }
 }
 
 /// A typed value used in `term`/`range` clauses; serialized per the field's type.
@@ -119,6 +168,51 @@ extension Query {
         .regex(field: field, pattern: pattern)
     }
 
+    /// Match documents whose indexed token in `field` fits a wildcard `pattern`,
+    /// where `*` stands for any run of characters and every other character is
+    /// literal (e.g. `"nor*"`, `"*way"`, `"n*way"`). Like ``regex(_:_:)`` it
+    /// matches indexed tokens — a single token on a tokenized text field, the
+    /// whole value on a `string` field — and the pattern spans the entire token.
+    public static func wildcard(_ field: String, _ pattern: String) -> Query {
+        .wildcard(field: field, pattern: pattern)
+    }
+
+    /// Match documents that have any non-null value in `field` — the "is this
+    /// field set?" filter, and its negation (`.exists(f).excluding` /
+    /// `anyOf(...).excluding(.exists(f))`) finds documents missing it.
+    ///
+    /// tantivy evaluates this over the field's fast column, so `field` must be
+    /// declared `fast: true` in the schema.
+    public static func exists(_ field: String) -> Query {
+        .exists(field: field)
+    }
+
+    /// Find documents similar to the given text — the classic "related documents"
+    /// / "more like this" query. `fields` maps each field to one or more source
+    /// texts; tantivy analyzes them with that field's tokenizer, picks the most
+    /// characteristic terms, and builds a weighted `should` query from them.
+    ///
+    /// ```swift
+    /// let related = try index.search(.moreLikeThis(["body": [article.body]]), limit: 5)
+    /// ```
+    ///
+    /// On small corpora tune ``MoreLikeThisOptions`` — the defaults
+    /// (`minDocFrequency` 5, `minTermFrequency` 2) can match nothing. To find
+    /// documents similar to one already indexed, see
+    /// ``Index/moreLikeThis(idField:id:fields:options:limit:)``.
+    public static func moreLikeThis(
+        _ fields: [String: [String]], options: MoreLikeThisOptions = .default
+    ) -> Query {
+        .moreLikeThis(fields: fields, options: options)
+    }
+
+    /// `moreLikeThis` from a single field and a single source text.
+    public static func moreLikeThis(
+        _ field: String, _ text: String, options: MoreLikeThisOptions = .default
+    ) -> Query {
+        .moreLikeThis(fields: [field: [text]], options: options)
+    }
+
     /// Open/closed range from explicit bounds (omit a side for unbounded).
     public static func range(_ field: String, from lower: RangeBound? = nil, to upper: RangeBound? = nil) -> Query {
         .range(field: field, lower: lower, upper: upper)
@@ -204,6 +298,21 @@ extension Query {
                     "distance": Int(distance), "transposition": transposition, "prefix": prefix]
         case .regex(let field, let pattern):
             return ["type": "regex", "field": field, "value": pattern]
+        case .wildcard(let field, let pattern):
+            return ["type": "wildcard", "field": field, "value": pattern]
+        case .exists(let field):
+            return ["type": "exists", "field": field]
+        case .moreLikeThis(let fields, let options):
+            var node: [String: Any] = ["type": "more_like_this", "fields": fields]
+            if let v = options.minDocFrequency { node["min_doc_frequency"] = v }
+            if let v = options.maxDocFrequency { node["max_doc_frequency"] = v }
+            if let v = options.minTermFrequency { node["min_term_frequency"] = v }
+            if let v = options.maxQueryTerms { node["max_query_terms"] = v }
+            if let v = options.minWordLength { node["min_word_length"] = v }
+            if let v = options.maxWordLength { node["max_word_length"] = v }
+            if let v = options.boostFactor { node["boost_factor"] = Double(v) }
+            if !options.stopWords.isEmpty { node["stop_words"] = options.stopWords }
+            return node
         case .phrase(let field, let terms, let slop):
             return ["type": "phrase", "field": field, "terms": terms, "slop": Int(slop)]
         case .phrasePrefix(let field, let terms, let maxExpansions):
@@ -244,8 +353,12 @@ extension Query {
             return true
         }
         switch self {
-        case .matchAll, .parsed, .fuzzy, .regex, .phrase, .phrasePrefix:
+        case .matchAll, .parsed, .fuzzy, .regex, .wildcard, .exists, .phrase, .phrasePrefix:
             break
+        case .moreLikeThis(_, let options):
+            if let b = options.boostFactor, !b.isFinite {
+                throw .encoding("non-finite more_like_this boost factor")
+            }
         case .term(_, let value):
             if !finite(value) { throw .encoding("non-finite number in term query") }
         case .range(let field, let lower, let upper):
@@ -275,6 +388,40 @@ extension Query {
             throw TantivyError.encoding("could not serialize query")
         }
         return String(decoding: data, as: UTF8.self)
+    }
+}
+
+// MARK: - More-like-this by document
+
+extension Index {
+    /// Find documents similar to the one whose `idField` equals `id` — "related
+    /// documents". Reads the named stored `fields` from that document and runs a
+    /// ``Query/moreLikeThis(_:options:)``, excluding the source document itself.
+    /// Returns `[]` if no document has that id.
+    ///
+    /// ```swift
+    /// let related = try index.moreLikeThis(idField: "slug", id: article.slug,
+    ///                                      fields: ["title", "body"], limit: 5)
+    /// ```
+    ///
+    /// The compared `fields` must be `stored` (only stored text is available to
+    /// read back). `idField` should be a single-token field (a `string`/raw or
+    /// numeric id) so the self-exclusion matches exactly.
+    public func moreLikeThis(
+        idField: String, id: String, fields: [String],
+        options: MoreLikeThisOptions = .default, limit: Int = 10
+    ) throws -> [SearchHit] {
+        guard let source = try get(idField, equals: id) else { return [] }
+        var like: [String: [String]] = [:]
+        for field in fields {
+            let strings: [String] = source[field].compactMap {
+                if case .string(let s) = $0 { return s } else { return nil }
+            }
+            if !strings.isEmpty { like[field] = strings }
+        }
+        guard !like.isEmpty else { return [] }
+        return try search(
+            .moreLikeThis(like, options: options).excluding(.term(idField, id)), limit: limit)
     }
 }
 

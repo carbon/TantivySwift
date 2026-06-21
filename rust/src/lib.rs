@@ -31,13 +31,14 @@ use tantivy::directory::MmapDirectory;
 use tantivy::aggregation::agg_req::Aggregations;
 use tantivy::aggregation::AggregationCollector;
 use tantivy::query::{
-    AllQuery, BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhrasePrefixQuery, PhraseQuery,
-    Query, QueryParser, RangeQuery, RegexQuery, TermQuery,
+    wildcard_query_to_regex_str, AllQuery, BooleanQuery, BoostQuery, ExistsQuery, FuzzyTermQuery,
+    MoreLikeThisQuery, Occur, PhrasePrefixQuery, PhraseQuery, Query, QueryParser, RangeQuery,
+    RegexQuery, TermQuery,
 };
 use tantivy::schema::document::Document;
 use tantivy::schema::{
-    DateOptions, Field, FieldType, IndexRecordOption, NumericOptions, Schema, TantivyDocument, Term,
-    TextFieldIndexing, TextOptions,
+    DateOptions, Field, FieldType, IndexRecordOption, NumericOptions, OwnedValue, Schema,
+    TantivyDocument, Term, TextFieldIndexing, TextOptions,
 };
 use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::{LowerCaser, RawTokenizer, TextAnalyzer};
@@ -753,6 +754,9 @@ pub extern "C" fn tantivy_index_count(
 //   {"type":"term","field":F,"value":V}
 //   {"type":"fuzzy","field":F,"value":S,"distance":1,"transposition":true,"prefix":false}
 //   {"type":"regex","field":F,"value":S}
+//   {"type":"wildcard","field":F,"value":S}            ('*' = any chars)
+//   {"type":"exists","field":F}                        (F must be a fast field)
+//   {"type":"more_like_this","fields":{F:[S,...]},"min_doc_frequency":N?,...}
 //   {"type":"phrase","field":F,"terms":[S,...],"slop":0}
 //   {"type":"phrase_prefix","field":F,"terms":[S,...],"max_expansions":N?}
 //   {"type":"range","field":F,"lower":{"value":V,"included":true}|null,"upper":...}
@@ -1025,6 +1029,93 @@ fn build_query(
             let q = RegexQuery::from_pattern(pattern, field)
                 .map_err(|e| format!("invalid regex pattern: {e}"))?;
             Ok(Box::new(q))
+        }
+        "wildcard" => {
+            // `*` matches any run of characters; every other character is
+            // literal. Like regex, this matches against indexed *terms*: a single
+            // token on a tokenized text field, the whole value on a `string` field.
+            let (field, value) = field_and_value(schema, node)?;
+            let pattern = value.as_str().ok_or("wildcard 'value' must be a string")?;
+            let regex = wildcard_query_to_regex_str(pattern);
+            let q = RegexQuery::from_pattern(&regex, field)
+                .map_err(|e| format!("invalid wildcard pattern: {e}"))?;
+            Ok(Box::new(q))
+        }
+        "exists" => {
+            // Matches documents that have any non-null value in `field`. tantivy
+            // implements this over the fast column, so the field must be `fast`.
+            let name = node
+                .get("field")
+                .and_then(|x| x.as_str())
+                .ok_or("exists missing 'field'")?;
+            let f = schema
+                .get_field(name)
+                .map_err(|_| format!("unknown field '{name}'"))?;
+            if !schema.get_field_entry(f).field_type().is_fast() {
+                return Err(format!(
+                    "exists requires a fast field; '{name}' is not declared fast"
+                ));
+            }
+            Ok(Box::new(ExistsQuery::new(name.to_string(), false)))
+        }
+        "more_like_this" => {
+            // Find documents similar to a set of field values (the classic
+            // "related documents" query). Values are analyzed with each field's
+            // tokenizer; only text/string fields are meaningful here.
+            let fields_obj = node
+                .get("fields")
+                .and_then(|x| x.as_object())
+                .ok_or("more_like_this requires a 'fields' object of {field: [strings]}")?;
+            let mut doc_fields: Vec<(Field, Vec<OwnedValue>)> =
+                Vec::with_capacity(fields_obj.len());
+            for (name, vals) in fields_obj {
+                let field = schema
+                    .get_field(name)
+                    .map_err(|_| format!("unknown field '{name}'"))?;
+                let arr = vals
+                    .as_array()
+                    .ok_or_else(|| format!("more_like_this field '{name}' must be an array"))?;
+                let mut values = Vec::with_capacity(arr.len());
+                for v in arr {
+                    let s = v
+                        .as_str()
+                        .ok_or_else(|| format!("more_like_this field '{name}' values must be strings"))?;
+                    values.push(OwnedValue::Str(s.to_string()));
+                }
+                doc_fields.push((field, values));
+            }
+            if doc_fields.is_empty() {
+                return Err("more_like_this requires at least one field".to_string());
+            }
+
+            let mut b = MoreLikeThisQuery::builder();
+            if let Some(n) = node.get("min_doc_frequency").and_then(|x| x.as_u64()) {
+                b = b.with_min_doc_frequency(n);
+            }
+            if let Some(n) = node.get("max_doc_frequency").and_then(|x| x.as_u64()) {
+                b = b.with_max_doc_frequency(n);
+            }
+            if let Some(n) = node.get("min_term_frequency").and_then(|x| x.as_u64()) {
+                b = b.with_min_term_frequency(n as usize);
+            }
+            if let Some(n) = node.get("max_query_terms").and_then(|x| x.as_u64()) {
+                b = b.with_max_query_terms(n as usize);
+            }
+            if let Some(n) = node.get("min_word_length").and_then(|x| x.as_u64()) {
+                b = b.with_min_word_length(n as usize);
+            }
+            if let Some(n) = node.get("max_word_length").and_then(|x| x.as_u64()) {
+                b = b.with_max_word_length(n as usize);
+            }
+            if let Some(f) = node.get("boost_factor").and_then(|x| x.as_f64()) {
+                b = b.with_boost_factor(f as f32);
+            }
+            if let Some(arr) = node.get("stop_words").and_then(|x| x.as_array()) {
+                let words: Vec<String> =
+                    arr.iter().filter_map(|w| w.as_str().map(String::from)).collect();
+                b = b.with_stop_words(words);
+            }
+            Ok(Box::new(b.with_document_fields(doc_fields)))
         }
         "phrase" => {
             let name = node
