@@ -44,6 +44,16 @@ private enum Convert {
         default: throw mismatch(Double.self, v, path)
         }
     }
+    /// Narrow to `Float`, rejecting a finite `f64` that overflows it. Plain
+    /// `Float(1e300)` is `+infinity`, so without this check an out-of-range
+    /// value decodes as an infinity instead of throwing — unlike every integer
+    /// conversion here, which range-checks via `exactly:`.
+    static func float(_ v: FieldValue, _ path: [CodingKey]) throws -> Float {
+        let d = try double(v, path)
+        let f = Float(d)
+        guard f.isFinite || !d.isFinite else { throw mismatch(Float.self, v, path) }
+        return f
+    }
     static func int64(_ v: FieldValue, _ path: [CodingKey]) throws -> Int64 {
         switch v {
         case .int(let i): return i
@@ -128,7 +138,7 @@ private struct FieldsKeyed<Key: CodingKey>: KeyedDecodingContainerProtocol {
     func decode(_ type: Bool.Type, forKey key: Key) throws -> Bool { try Convert.bool(first(key), path(key)) }
     func decode(_ type: String.Type, forKey key: Key) throws -> String { try Convert.string(first(key), path(key)) }
     func decode(_ type: Double.Type, forKey key: Key) throws -> Double { try Convert.double(first(key), path(key)) }
-    func decode(_ type: Float.Type, forKey key: Key) throws -> Float { Float(try Convert.double(first(key), path(key))) }
+    func decode(_ type: Float.Type, forKey key: Key) throws -> Float { try Convert.float(first(key), path(key)) }
     func decode(_ type: Int.Type, forKey key: Key) throws -> Int { try Convert.signed(first(key), path(key)) }
     func decode(_ type: Int8.Type, forKey key: Key) throws -> Int8 { try Convert.signed(first(key), path(key)) }
     func decode(_ type: Int16.Type, forKey key: Key) throws -> Int16 { try Convert.signed(first(key), path(key)) }
@@ -198,7 +208,7 @@ private struct FieldUnkeyed: UnkeyedDecodingContainer {
     mutating func decode(_ type: Bool.Type) throws -> Bool { try Convert.bool(next(), codingPath) }
     mutating func decode(_ type: String.Type) throws -> String { try Convert.string(next(), codingPath) }
     mutating func decode(_ type: Double.Type) throws -> Double { try Convert.double(next(), codingPath) }
-    mutating func decode(_ type: Float.Type) throws -> Float { Float(try Convert.double(next(), codingPath)) }
+    mutating func decode(_ type: Float.Type) throws -> Float { try Convert.float(next(), codingPath) }
     mutating func decode(_ type: Int.Type) throws -> Int { try Convert.signed(next(), codingPath) }
     mutating func decode(_ type: Int8.Type) throws -> Int8 { try Convert.signed(next(), codingPath) }
     mutating func decode(_ type: Int16.Type) throws -> Int16 { try Convert.signed(next(), codingPath) }
@@ -245,7 +255,7 @@ private struct FieldSingle: SingleValueDecodingContainer {
     func decode(_ type: Bool.Type) throws -> Bool { try Convert.bool(req(), codingPath) }
     func decode(_ type: String.Type) throws -> String { try Convert.string(req(), codingPath) }
     func decode(_ type: Double.Type) throws -> Double { try Convert.double(req(), codingPath) }
-    func decode(_ type: Float.Type) throws -> Float { Float(try Convert.double(req(), codingPath)) }
+    func decode(_ type: Float.Type) throws -> Float { try Convert.float(req(), codingPath) }
     func decode(_ type: Int.Type) throws -> Int { try Convert.signed(req(), codingPath) }
     func decode(_ type: Int8.Type) throws -> Int8 { try Convert.signed(req(), codingPath) }
     func decode(_ type: Int16.Type) throws -> Int16 { try Convert.signed(req(), codingPath) }

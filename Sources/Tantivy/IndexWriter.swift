@@ -193,6 +193,11 @@ public final class IndexWriter {
     }
 
     private func deleteTerm(field: String, valueJSON: String) throws(TantivyError) {
+        // The field name crosses as a C string: an interior NUL would truncate
+        // it, and whenever the prefix is itself a valid field name the delete
+        // silently lands on that field instead — removing documents the
+        // requested field never matched.
+        try Index.validateNoInteriorNUL(field, "delete field name '\(field)'")
         var err: UnsafeMutablePointer<CChar>?
         let rc = field.withCString { fC in
             valueJSON.withCString { vC in

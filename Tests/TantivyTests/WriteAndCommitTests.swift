@@ -108,4 +108,61 @@ struct WriteAndCommitTests {
         }
         withExtendedLifetime(first) {}
     }
+
+    // MARK: - `write` block semantics
+
+    private struct Boom: Error {}
+
+    /// `write` documents all-or-nothing semantics: a throw from the body skips
+    /// the commit, so the queued documents are dropped rather than half-applied.
+    @Test func writeBlockDiscardsQueuedDocumentsOnThrow() throws {
+        let index = try textIndex()
+        try index.write { try $0.addDocument(["t": "committed"]) }
+        #expect(index.documentCount == 1)
+
+        #expect(throws: Boom.self) {
+            try index.write { w in
+                try w.addDocument(["t": "doomed one"])
+                try w.addDocument(["t": "doomed two"])
+                throw Boom()
+            }
+        }
+        try index.reload()
+        #expect(index.documentCount == 1)                       // neither landed
+        #expect(try index.search("doomed").isEmpty)
+        #expect(try index.search("committed").count == 1)        // the earlier commit survives
+    }
+
+    /// The discarded writer must also release the directory lock, or every
+    /// later write would fail with `LockBusy` after a single failed block.
+    @Test func writeBlockReleasesTheWriterLockOnThrow() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tantivy-write-throw-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let index = try Index(path: dir, schema: SchemaBuilder()
+            .addTextField("t", stored: true).build())
+
+        #expect(throws: Boom.self) {
+            try index.write { w in
+                try w.addDocument(["t": "doomed"])
+                throw Boom()
+            }
+        }
+        // A second write must still succeed.
+        try index.write { try $0.addDocument(["t": "after"]) }
+        #expect(index.documentCount == 1)
+        #expect(try index.search("after").count == 1)
+        #expect(try index.search("doomed").isEmpty)
+    }
+
+    /// The return value is forwarded when the body succeeds.
+    @Test func writeBlockReturnsBodyResult() throws {
+        let index = try textIndex()
+        let count = try index.write { w -> Int in
+            for i in 0..<3 { try w.addDocument(["t": "doc \(i)"]) }
+            return 3
+        }
+        #expect(count == 3)
+        #expect(index.documentCount == 3)
+    }
 }

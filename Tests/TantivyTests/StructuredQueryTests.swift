@@ -138,6 +138,48 @@ struct StructuredQueryTests {
         #expect(got == [Doc(title: "Moby Dick", year: 1851)])
     }
 
+    // MARK: - Queries that legitimately match nothing
+
+    /// An empty boolean matches nothing rather than everything — worth pinning,
+    /// because `allOf([])` reads like "no constraints" and a silent match-all
+    /// would be dangerous on the `delete(matching:)` path.
+    @Test func emptyBooleanMatchesNothing() throws {
+        let index = try corpus()
+        #expect(try index.count(.allOf([])) == 0)
+        #expect(try index.count(.anyOf([])) == 0)
+        // Nothing is deleted by one either.
+        try index.delete(matching: .allOf([]))
+        #expect(try index.count(.matchAll) == 3)
+    }
+
+    /// A `minimumShouldMatch` above the clause count is satisfiable by no
+    /// document, so it matches nothing instead of erroring.
+    @Test func minimumShouldMatchAboveClauseCountMatchesNothing() throws {
+        let index = try corpus()
+        let clauses: [Query] = [.term("tag", "book"), .term("tag", "classic")]
+        #expect(try index.count(.anyOf(clauses, minimumShouldMatch: 2)) == 0)  // mutually exclusive
+        #expect(try index.count(.anyOf(clauses, minimumShouldMatch: 5)) == 0)
+        // Zero is the same as not requiring a minimum.
+        #expect(try index.count(.anyOf(clauses, minimumShouldMatch: 0)) == 3)
+        #expect(try index.count(.anyOf(clauses)) == 3)
+    }
+
+    /// `phrase`/`phrasePrefix` need at least one term; an empty array is a
+    /// clean error, not a match-all.
+    @Test func emptyPhraseTermsThrow() throws {
+        let index = try corpus()
+        #expect(throws: TantivyError.self) { try index.count(.phrase("body", [])) }
+        #expect(throws: TantivyError.self) { try index.count(.phrasePrefix("body", [])) }
+    }
+
+    /// A single-term `phrase` degrades to a term query rather than failing the
+    /// engine's two-term phrase requirement.
+    @Test func singleTermPhraseBehavesLikeATerm() throws {
+        let index = try corpus()
+        #expect(try index.count(.phrase("body", ["ishmael"])) == 1)
+        #expect(try index.count(.phrase("body", ["ishmael"], slop: 3)) == 1)
+    }
+
     @Test func unknownFieldThrows() throws {
         #expect(throws: TantivyError.self) {
             try corpus().search(.term("ghost", "x"))

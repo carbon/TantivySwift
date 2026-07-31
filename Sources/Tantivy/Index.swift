@@ -94,6 +94,10 @@ public final class Index: @unchecked Sendable {
     /// Create a writer. There must be at most one writer per index at a time.
     /// - Parameter heapSize: indexing memory budget in bytes (0 → 50 MB).
     public func writer(heapSize: Int = 0) throws(TantivyError) -> IndexWriter {
+        // A negative size wraps to a huge `usize` at the FFI boundary, which the
+        // engine then rejects for exceeding its per-thread arena cap — an error
+        // that says nothing about the value actually passed.
+        try Self.validateNonNegative(heapSize, "heapSize")
         var err: UnsafeMutablePointer<CChar>?
         guard let w = tantivy_index_writer(handle, heapSize, &err) else {
             throw TantivyError.take(&err, fallback: "could not create writer")
@@ -138,6 +142,9 @@ public final class Index: @unchecked Sendable {
         try Self.validateQueryString(query)
         try Self.validateNonNegative(limit, "limit")
         try Self.validateNonNegative(snippetMaxChars, "snippetMaxChars")
+        try Self.validateFieldNames(fields, "default")
+        try Self.validateFieldNames(highlight, "highlight")
+        if let orderBy { try Self.validateFieldName(orderBy.field, "order-by") }
         var err: UnsafeMutablePointer<CChar>?
         let csv = fields.joined(separator: ",")
         let boostsJSON = try Self.boostsJSON(boosts)
@@ -174,6 +181,8 @@ public final class Index: @unchecked Sendable {
     ) throws(TantivyError) -> [SearchHit] {
         try Self.validateNonNegative(limit, "limit")
         try Self.validateNonNegative(snippetMaxChars, "snippetMaxChars")
+        try Self.validateFieldNames(highlight, "highlight")
+        if let orderBy { try Self.validateFieldName(orderBy.field, "order-by") }
         var err: UnsafeMutablePointer<CChar>?
         let qjson = try query.jsonString()
         let snipCSV = highlight.joined(separator: ",")
@@ -201,6 +210,7 @@ public final class Index: @unchecked Sendable {
         _ query: String, fields: [String] = [], boosts: [String: Double] = [:]
     ) throws(TantivyError) -> Int {
         try Self.validateQueryString(query)
+        try Self.validateFieldNames(fields, "default")
         var err: UnsafeMutablePointer<CChar>?
         let csv = fields.joined(separator: ",")
         let boostsJSON = try Self.boostsJSON(boosts)
@@ -226,12 +236,35 @@ public final class Index: @unchecked Sendable {
 
     // MARK: - Argument validation
 
-    /// A query string travels to the engine as a C string, so an interior NUL
-    /// would silently truncate it there — searching for less than was asked.
-    private static func validateQueryString(_ query: String) throws(TantivyError) {
-        if query.unicodeScalars.contains("\u{0}") {
-            throw .encoding("query string contains an interior NUL character")
+    /// Every string handed to the engine travels as a C string, so an interior
+    /// NUL would silently truncate it there. Depending on the argument that
+    /// means searching, highlighting, or sorting on a *different* field than
+    /// asked for (whenever the truncated prefix is itself a valid field name),
+    /// or — via `IndexWriter.deleteDocuments(field:equals:)` — deleting
+    /// documents the requested field never matched.
+    static func validateNoInteriorNUL(_ s: String, _ what: String) throws(TantivyError) {
+        if s.unicodeScalars.contains("\u{0}") {
+            throw .encoding("\(what) contains an interior NUL character")
         }
+    }
+
+    private static func validateQueryString(_ query: String) throws(TantivyError) {
+        try validateNoInteriorNUL(query, "query string")
+    }
+
+    /// Field names reach the engine as comma-separated C strings, so both an
+    /// interior NUL and an embedded comma would change which fields are used.
+    static func validateFieldName(_ name: String, _ what: String) throws(TantivyError) {
+        try validateNoInteriorNUL(name, "\(what) field name '\(name)'")
+        if name.contains(",") {
+            throw .encoding("\(what) field name '\(name)' contains a comma")
+        }
+    }
+
+    private static func validateFieldNames(
+        _ names: [String], _ what: String
+    ) throws(TantivyError) {
+        for name in names { try validateFieldName(name, what) }
     }
 
     /// Negative counts would wrap to huge values at the `usize` FFI boundary.
@@ -247,6 +280,12 @@ public final class Index: @unchecked Sendable {
         guard !boosts.isEmpty else { return "" }
         for (field, value) in boosts where !value.isFinite {
             throw .encoding("non-finite boost for field '\(field)' (NaN/±∞)")
+        }
+        // A NUL survives JSON-escaped rather than truncating, but the engine's
+        // "unknown field" message then contains it and is lost on the way back
+        // out — leaving a bare `tantivy: error`. Reject it here instead.
+        for field in boosts.keys {
+            try validateNoInteriorNUL(field, "boost field name '\(field)'")
         }
         guard let data = try? JSONSerialization.data(withJSONObject: boosts) else {
             throw .encoding("could not serialize boosts")
