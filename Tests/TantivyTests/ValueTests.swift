@@ -125,4 +125,68 @@ struct ValueTests {
         // A range still matches a doc via any of its values.
         #expect(try index.search("n:[3 TO 9]").count == 1)
     }
+
+    // MARK: - Narrowing a stored f64 to Float
+
+    private func bigDoubleIndex() throws -> Index {
+        let index = try Index.inMemory(schema: SchemaBuilder()
+            .addF64Field("big", stored: true)
+            .addF64Field("ok", stored: true)
+            .build())
+        try index.add(["big": 1e300, "ok": 1.5])
+        return index
+    }
+
+    /// `Float(1e300)` is `+infinity`, so an out-of-range `f64` used to decode as
+    /// an infinity instead of throwing — unlike the integer conversions, which
+    /// range-check. Silently substituting infinity for a real measurement is
+    /// worse than refusing to decode it.
+    @Test func floatOverflowThrowsRatherThanBecomingInfinity() throws {
+        let hit = try #require(try bigDoubleIndex().search(.matchAll, limit: 1).first)
+
+        struct Scalar: Decodable { let big: Float }
+        #expect(throws: DecodingError.self) { try hit.decode(Scalar.self) }
+
+        // Same guard behind an array property (the unkeyed container)...
+        struct InArray: Decodable { let big: [Float] }
+        #expect(throws: DecodingError.self) { try hit.decode(InArray.self) }
+
+        // ...and behind an optional (the single-value container).
+        struct Optionally: Decodable { let big: Float? }
+        #expect(throws: DecodingError.self) { try hit.decode(Optionally.self) }
+
+        // `Double` keeps the value; only the narrowing conversion refuses it.
+        struct AsDouble: Decodable { let big: Double }
+        #expect(try hit.decode(AsDouble.self).big == 1e300)
+    }
+
+    /// An in-range value still decodes as `Float`, so the guard rejects only
+    /// what genuinely doesn't fit.
+    @Test func inRangeFloatStillDecodes() throws {
+        let hit = try #require(try bigDoubleIndex().search(.matchAll, limit: 1).first)
+        struct M: Decodable { let ok: Float }
+        #expect(try hit.decode(M.self).ok == 1.5)
+    }
+
+    /// Integers spanning the full u64 range survive the store and match as
+    /// terms — the exactness `FieldValue` documents, at the boundary.
+    @Test func uint64MaxRoundTrips() throws {
+        let index = try Index.inMemory(schema: SchemaBuilder()
+            .addU64Field("id", stored: true, indexed: true, fast: true)
+            .build())
+        var doc = Document()
+        doc["id"] = .unsigned(UInt64.max)
+        try index.add(doc)
+
+        let hit = try #require(try index.search(.matchAll, limit: 1).first)
+        #expect(hit["id"] == [.unsigned(UInt64.max)])
+        #expect(hit.uint("id") == UInt64.max)
+        #expect(hit.int("id") == nil)              // does not fit in an Int64
+        #expect(try index.count(.term("id", UInt64.max)) == 1)
+
+        struct M: Decodable { let id: UInt64 }
+        #expect(try hit.decode(M.self).id == UInt64.max)
+        struct TooNarrow: Decodable { let id: Int64 }
+        #expect(throws: DecodingError.self) { try hit.decode(TooNarrow.self) }
+    }
 }

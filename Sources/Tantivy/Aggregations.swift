@@ -25,6 +25,11 @@ extension Index {
     public func termCounts(
         _ field: String, matching query: Query = .matchAll, limit: Int = 10
     ) throws(TantivyError) -> [FacetCount] {
+        try Self.validateNoInteriorNUL(field, "termCounts field name '\(field)'")
+        // A negative size reaches tantivy's aggregation parser as a bad `u32`
+        // and surfaces as an opaque serde message; reject it here as `search`
+        // does for `limit`.
+        if limit < 0 { throw .encoding("limit must be non-negative (got \(limit))") }
         let request: [String: Any] = ["counts": ["terms": ["field": field, "size": limit]]]
         guard let data = try? JSONSerialization.data(withJSONObject: request) else {
             throw .encoding("could not serialize aggregation request")
@@ -64,6 +69,9 @@ extension Index {
     public func aggregate(
         _ aggregationsJSON: String, matching query: Query = .matchAll
     ) throws(TantivyError) -> String {
+        // An interior NUL would truncate the request at the C boundary, running
+        // whatever prefix happened to parse and silently dropping the rest.
+        try Self.validateNoInteriorNUL(aggregationsJSON, "aggregation request")
         var err: UnsafeMutablePointer<CChar>?
         let qjson = try query.jsonString()
         let raw: UnsafeMutablePointer<CChar>? =

@@ -38,6 +38,36 @@ struct FeatureTests {
         #expect(got.at == when)        // second-precision round-trip
     }
 
+    /// A `Date` carrying a fraction of a second is *truncated* (not rounded) on
+    /// the way in, which is the documented second precision. Pinned because it
+    /// is silently lossy: the value read back is not the value written.
+    @Test func subSecondDatesAreTruncatedNotRounded() throws {
+        struct Event: Codable { let at: Date }
+        let index = try Index.inMemory(schema: SchemaBuilder()
+            .addDateField("at", stored: true, indexed: true, fast: true).build())
+
+        let whole = 1_600_000_000.0
+        try index.add(Event(at: Date(timeIntervalSince1970: whole + 0.999)))
+        let got = try #require(try index.search(.matchAll, as: Event.self, limit: 1).first)
+        #expect(got.at.timeIntervalSince1970 == whole)          // truncated, not 1_600_000_001
+        #expect(try index.search(.matchAll, limit: 1)[0].string("at") == "2020-09-13T12:26:40Z")
+    }
+
+    /// Terms built from a `Date` are truncated the same way, so a query date
+    /// still matches a document stored with sub-second precision through the
+    /// raw-JSON path — the two sides agree on second granularity.
+    @Test func dateTermsMatchAcrossSubSecondPrecision() throws {
+        let index = try Index.inMemory(schema: SchemaBuilder()
+            .addDateField("at", stored: true, indexed: true, fast: true).build())
+        try index.add(["at": "2020-09-13T12:26:40.750Z"])       // sub-second, raw JSON
+
+        let queried = Date(timeIntervalSince1970: 1_600_000_000.25)
+        #expect(try index.count(.term("at", date: queried)) == 1)
+        #expect(try index.count(.dateRange("at", from: queried, to: queried)) == 1)
+        // The stored value keeps its precision even though the term is coarser.
+        #expect(try index.search(.matchAll, limit: 1)[0].string("at") == "2020-09-13T12:26:40.75Z")
+    }
+
     // MARK: - Per-field boosts
 
     @Test func fieldBoostsChangeRanking() throws {

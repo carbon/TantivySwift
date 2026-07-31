@@ -255,4 +255,38 @@ struct WildcardExistsMLTTests {
         let hits = try index.search(.moreLikeThis("body", "quick brown fox", options: opts))
         #expect(!titles(hits).contains("Fox Racing"))
     }
+
+    /// `minWordLength` drops short source words, so raising it past every
+    /// distinctive term leaves nothing to match on.
+    @Test func minWordLengthFiltersShortTerms() throws {
+        let index = try articlesIndex()
+        var opts = looseMLT
+        opts.minWordLength = 4                              // "fox" and "dog" are 3
+        let hits = try index.search(.moreLikeThis("body", "fox dog", options: opts))
+        #expect(hits.isEmpty)
+        opts.minWordLength = 3                              // now both qualify
+        #expect(!(try index.search(.moreLikeThis("body", "fox dog", options: opts))).isEmpty)
+    }
+
+    /// `maxWordLength` is the mirror image: it drops long source words.
+    @Test func maxWordLengthFiltersLongTerms() throws {
+        let index = try articlesIndex()
+        var opts = looseMLT
+        opts.maxWordLength = 2                              // shorter than every term
+        #expect(try index.search(.moreLikeThis("body", "rockets orbits", options: opts)).isEmpty)
+        opts.maxWordLength = 20
+        #expect(try index.search(.moreLikeThis("body", "rockets orbits", options: opts))
+                    .contains { $0.string("title") == "Rocketry" })
+    }
+
+    /// `maxDocFrequency` ignores source terms that are too common to be
+    /// characteristic — at 1, a term appearing in two documents is skipped.
+    @Test func maxDocFrequencyIgnoresCommonTerms() throws {
+        let index = try articlesIndex()
+        var opts = looseMLT
+        opts.maxDocFrequency = 1                            // "fox" is in two docs
+        #expect(try index.search(.moreLikeThis("body", "fox", options: opts)).isEmpty)
+        opts.maxDocFrequency = 10
+        #expect(!(try index.search(.moreLikeThis("body", "fox", options: opts))).isEmpty)
+    }
 }
