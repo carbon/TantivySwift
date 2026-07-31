@@ -25,8 +25,8 @@ let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
 
 // Published binary, downloaded + checksum-verified by SwiftPM on resolve.
 // scripts/release.sh rewrites these two lines for each release.
-let release  = "0.6.0"
-let checksum = "5fa1980824f0d305b929864f67ece637221a148ff512b748339fa189c30c6951"
+let release  = "0.6.1"
+let checksum = "c5462730c77238c11e1ef1b95238965c782ec7bed7124463a0358bedb63a8ff2"
 let remoteXCFramework =
     "https://github.com/carbon/TantivySwift/releases/download/\(release)/CTantivy.xcframework.zip"
 
