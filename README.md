@@ -105,6 +105,7 @@ results), `indexed` (make it searchable), and `fast` (columnar storage) options.
 | `addStringField(_:stored:indexed:fast:)` | single raw token (exact match: ids, tags) |
 | `addU64Field` / `addI64Field` / `addF64Field` / `addBoolField` | numerics |
 | `addDateField(_:stored:indexed:fast:)` | date/time (RFC3339; `Date` round-trips at second precision) |
+| `addBytesField(_:stored:indexed:fast:)` | opaque byte string (exact match: binary ids, hashes, UUIDs) |
 
 `tokenizer` is a typed `Analyzer` (default `.default`); the cases mirror exactly
 what the native layer registers (a drift-guard test enforces this):
@@ -123,6 +124,42 @@ what the native layer registers (a drift-guard test enforces this):
 
 `indexing` controls postings detail; `.position` (the default) is required for
 phrase queries.
+
+#### Byte fields
+
+`addBytesField` is the byte-array analogue of `addStringField`: indexed, the
+whole value is one term matched byte-for-byte. Use it for a binary key — a UUID,
+a hash, a packed struct — where a `String` would force you to hex- or
+base64-encode it yourself.
+
+```swift
+let schema = SchemaBuilder()
+    .addBytesField("key", stored: true, indexed: true)
+    .addTextField("body")
+    .build()
+
+let key = Data(uuid.uuid)                              // 16 raw bytes
+
+try index.add(["key": key, "body": "hello"] as [String: Any])
+try index.search(.term("key", key))                    // exact lookup
+try writer.deleteDocuments(field: "key", equals: key)  // delete / upsert
+hit.data("key")                                        // -> Data?
+```
+
+Values carry any byte pattern at all — NULs, invalid UTF-8, all 256 byte values.
+Documents and hits are MessagePack, which has a native byte-string type, so
+nothing is base64-encoded on either leg. A `Data` property on a `Decodable`
+model decodes from a byte field directly.
+
+Two things to know:
+
+- Byte fields are not reachable from the query-string API (there is no way to
+  write arbitrary bytes in a query string). Use the structured `Query` API.
+- `addDocument(_ value: some Encodable)` is the one path that still goes through
+  JSON, since that is what `JSONEncoder` produces: `Data` is base64-encoded and
+  decoded back by the engine. The value round-trips identically, but it costs an
+  encode and a decode — use `Document` or the `[String: Any]` overload to avoid
+  both.
 
 ### Index
 
@@ -163,6 +200,7 @@ try writer.commitAndReload()                         // commit + index.reload()
 try writer.rollback()                                // discard uncommitted ops
 try writer.deleteAllDocuments()
 try writer.deleteDocuments(field: "id", equals: "abc123")            // delete by term
+try writer.deleteDocuments(field: "key", equals: someData)           // ...or a byte key
 try writer.deleteDocuments(field: "id", equalsAnyOf: ["a", "b"])     // multi-term delete
 try writer.deleteDocuments(matching: .range("year", 1900...1950))    // delete by query
 // or, with commit + reload in one step:
@@ -256,7 +294,7 @@ let scored = try collection.searchScored(q)           // [(score, Book)]
 ```
 
 Builders: `.matchAll`, `.parsed(query, fields:)`, `.term(field, value)` (string
-/ Int / UInt64 / Double / Bool / `date:`), `.phrase(field, [tokens], slop:)`,
+/ Int / UInt64 / Double / Bool / Data / `date:`), `.phrase(field, [tokens], slop:)`,
 `.phrasePrefix(field, [tokens], maxExpansions:)`, `.fuzzy(field, value,
 distance:…)`, `.prefix(field, value)`, `.autocomplete(field, value,
 typoTolerance:)`, `.regex(field, pattern)`, `.wildcard(field, pattern)`,
@@ -500,15 +538,59 @@ found.)
 Swift  Sources/Tantivy        — idiomatic API (Schema, Index, IndexWriter, SearchHit)
   │     import CTantivy        — C module (header + module map)
   ▼
-C ABI  rust/src/lib.rs         — #[no_mangle] extern "C" shim, JSON in/out
+C ABI  rust/src/lib.rs         — #[no_mangle] extern "C" shim, MessagePack + JSON
   ▼
 Rust   tantivy =0.26.1         — the search engine, pinned from crates.io
 ```
 
-The FFI surface is intentionally small and JSON-oriented: schema is a small JSON
-spec, documents are added as JSON objects (`TantivyDocument::parse_json`), and
-search returns a JSON envelope of hits. All heap strings crossing the boundary
-are owned and freed on the Rust side via `tantivy_string_free`.
+The boundary uses two encodings, chosen per path by what each actually costs:
+
+| Path | Encoding | Why |
+| --- | --- | --- |
+| Documents in | MessagePack | Measured 2.3× faster end-to-end than JSON |
+| Hits out | MessagePack | Measured 13× faster end-to-end than JSON |
+| Query trees, schema, boosts | JSON | A few hundred bytes, once per call |
+| Aggregations | JSON | It is tantivy's own Elasticsearch-compatible format |
+| `addDocument(json:)` | JSON | The escape hatch for JSON you already hold |
+
+Documents are a MessagePack map of `{field name: [values]}`, decoded against the
+schema — each value is read as the field's declared type rather than guessed
+from the encoding. Hits come back as `{hits: [{score, doc, snippets?}]}` and are
+read straight into `SearchHit`s, with no intermediate representation and no
+`Codable` in between.
+
+Both were JSON originally. Two measurements drove the change, and neither was
+about the format being verbose:
+
+- On reads, **83% of decode time was `Codable`**, not JSON parsing —
+  `FieldValue` discovered a value's type by attempting each decode in turn, so
+  every string threw four `DecodingError`s before succeeding.
+- On writes, Foundation's `JSONSerialization` cost 3–6× what `serde_json` spent
+  parsing the same content back, and the payload was copied twice more on its
+  way to a NUL-terminated C string.
+
+Byte values are why MessagePack rather than a faster JSON reader: it has a
+native byte-string type, so a `bytes` field needs no side-channel. Query trees
+are the exception — still JSON, so a byte value there is written
+`{"$bytes": "<base64>"}`. Tagged rather than a bare string so it stays
+distinguishable from a text term: aiming a `Data` at a `string` field is
+reported instead of quietly searching for its base64 text.
+
+The JSON payloads are written straight from their typed Swift representations
+by `JSONWriter`, with no intermediate `[String: Any]` — so the query path has no
+untyped boxing anywhere, and the output is byte-for-byte stable across runs
+(`JSONSerialization` emits dictionary keys in hash order).
+
+Heap strings crossing the boundary (errors, stats, aggregation results) are
+owned and freed on the Rust side via `tantivy_string_free`; search results are
+freed with `tantivy_result_free`.
+
+The benchmarks behind those numbers live in the test target and are skipped
+unless enabled:
+
+```bash
+TANTIVY_BENCH=1 swift test -c release --filter PathBenchmark
+```
 
 ## License
 

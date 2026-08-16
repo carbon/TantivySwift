@@ -84,6 +84,9 @@ public enum TermValue: Sendable {
     case double(Double)
     case bool(Bool)
     case date(Date)
+    /// A value for a `bytes` field. It is not serialized into the query JSON —
+    /// it crosses as raw memory, with the JSON holding a reference to it.
+    case bytes(Data)
 }
 
 /// One end of a `range`, inclusive or exclusive.
@@ -104,6 +107,13 @@ extension Query {
     public static func term(_ field: String, _ value: Bool) -> Query { .term(field: field, value: .bool(value)) }
     public static func term(_ field: String, _ value: Double) -> Query { .term(field: field, value: .double(value)) }
     public static func term(_ field: String, date value: Date) -> Query { .term(field: field, value: .date(value)) }
+
+    /// Exact match on a `bytes` field: documents whose value for `field` is
+    /// byte-for-byte `value`. The bytes are compared as stored — no analysis, no
+    /// encoding — which makes this the lookup for a binary id or key.
+    public static func term(_ field: String, _ value: Data) -> Query {
+        .term(field: field, value: .bytes(value))
+    }
 
     /// Embed a query *string* (tantivy query syntax, analyzed and parsed by the
     /// engine) as a node in a structured query — the bridge between the two
@@ -266,14 +276,17 @@ public func || (lhs: Query, rhs: Query) -> Query { .anyOf([lhs, rhs]) }
 // MARK: - JSON serialization (wire format for the FFI)
 
 extension TermValue {
-    fileprivate func jsonValue() -> Any {
+    /// Write this value into a query tree. A `bytes` value becomes base64 —
+    /// JSON has no byte type.
+    fileprivate func write(into out: inout JSONWriter) {
         switch self {
-        case .string(let s): return s
-        case .int(let i): return i
-        case .unsigned(let u): return u
-        case .double(let d): return d
-        case .bool(let b): return b
-        case .date(let date): return TermValue.rfc3339(date)
+        case .string(let s): out.write(s)
+        case .int(let i): out.write(i)
+        case .unsigned(let u): out.write(u)
+        case .double(let d): out.write(d)
+        case .bool(let b): out.write(b)
+        case .bytes(let data): out.write(data)
+        case .date(let date): out.write(TermValue.rfc3339(date))
         }
     }
     fileprivate static func rfc3339(_ date: Date) -> String {
@@ -282,70 +295,167 @@ extension TermValue {
 }
 
 extension RangeBound {
-    fileprivate func jsonObject() -> [String: Any] {
-        ["value": value.jsonValue(), "included": included]
+    fileprivate func write(into out: inout JSONWriter) {
+        out.raw("{\"value\":")
+        value.write(into: &out)
+        out.raw(",\"included\":")
+        out.write(included)
+        out.raw("}")
     }
 }
 
 extension Query {
-    fileprivate func jsonObject() -> [String: Any] {
+    /// Write this node as JSON.
+    ///
+    /// Emitted straight from the enum rather than via an intermediate
+    /// `[String: Any]`: every value's type is known at compile time here, so
+    /// there is nothing to box and nothing that can fail to serialize.
+    fileprivate func write(into out: inout JSONWriter) {
+        /// `"key":value` for an optional, omitted when nil.
+        func optional<T>(_ key: String, _ value: T?, _ emit: (T, inout JSONWriter) -> Void) {
+            guard let value else { return }
+            out.raw(",")
+            out.write(key)
+            out.raw(":")
+            emit(value, &out)
+        }
+
         switch self {
         case .matchAll:
-            return ["type": "all"]
+            out.raw(#"{"type":"all"}"#)
+
         case .parsed(let query, let fields):
-            return ["type": "parsed", "query": query, "fields": fields]
+            out.raw(#"{"type":"parsed","query":"#)
+            out.write(query)
+            out.raw(#","fields":"#)
+            out.write(fields)
+            out.raw("}")
+
         case .term(let field, let value):
-            return ["type": "term", "field": field, "value": value.jsonValue()]
+            out.raw(#"{"type":"term","field":"#)
+            out.write(field)
+            out.raw(#","value":"#)
+            value.write(into: &out)
+            out.raw("}")
+
         case .fuzzy(let field, let value, let distance, let transposition, let prefix):
-            return ["type": "fuzzy", "field": field, "value": value,
-                    "distance": Int(distance), "transposition": transposition, "prefix": prefix]
+            out.raw(#"{"type":"fuzzy","field":"#)
+            out.write(field)
+            out.raw(#","value":"#)
+            out.write(value)
+            out.raw(#","distance":"#)
+            out.write(Int(distance))
+            out.raw(#","transposition":"#)
+            out.write(transposition)
+            out.raw(#","prefix":"#)
+            out.write(prefix)
+            out.raw("}")
+
         case .regex(let field, let pattern):
-            return ["type": "regex", "field": field, "value": pattern]
+            out.raw(#"{"type":"regex","field":"#)
+            out.write(field)
+            out.raw(#","value":"#)
+            out.write(pattern)
+            out.raw("}")
+
         case .wildcard(let field, let pattern):
-            return ["type": "wildcard", "field": field, "value": pattern]
+            out.raw(#"{"type":"wildcard","field":"#)
+            out.write(field)
+            out.raw(#","value":"#)
+            out.write(pattern)
+            out.raw("}")
+
         case .exists(let field):
-            return ["type": "exists", "field": field]
+            out.raw(#"{"type":"exists","field":"#)
+            out.write(field)
+            out.raw("}")
+
         case .moreLikeThis(let fields, let options):
-            var node: [String: Any] = ["type": "more_like_this", "fields": fields]
-            if let v = options.minDocFrequency { node["min_doc_frequency"] = v }
-            if let v = options.maxDocFrequency { node["max_doc_frequency"] = v }
-            if let v = options.minTermFrequency { node["min_term_frequency"] = v }
-            if let v = options.maxQueryTerms { node["max_query_terms"] = v }
-            if let v = options.minWordLength { node["min_word_length"] = v }
-            if let v = options.maxWordLength { node["max_word_length"] = v }
-            if let v = options.boostFactor { node["boost_factor"] = Double(v) }
-            if !options.stopWords.isEmpty { node["stop_words"] = options.stopWords }
-            return node
+            out.raw(#"{"type":"more_like_this","fields":{"#)
+            for (index, name) in fields.keys.sorted().enumerated() {
+                if index > 0 { out.raw(",") }
+                out.write(name)
+                out.raw(":")
+                out.write(fields[name]!)
+            }
+            out.raw("}")
+            optional("min_doc_frequency", options.minDocFrequency) { $0 == nil ? () : $1.write($0) }
+            optional("max_doc_frequency", options.maxDocFrequency) { $1.write($0) }
+            optional("min_term_frequency", options.minTermFrequency) { $1.write($0) }
+            optional("max_query_terms", options.maxQueryTerms) { $1.write($0) }
+            optional("min_word_length", options.minWordLength) { $1.write($0) }
+            optional("max_word_length", options.maxWordLength) { $1.write($0) }
+            optional("boost_factor", options.boostFactor) { $1.write(Double($0)) }
+            if !options.stopWords.isEmpty {
+                optional("stop_words", options.stopWords) { $1.write($0) }
+            }
+            out.raw("}")
+
         case .phrase(let field, let terms, let slop):
-            return ["type": "phrase", "field": field, "terms": terms, "slop": Int(slop)]
+            out.raw(#"{"type":"phrase","field":"#)
+            out.write(field)
+            out.raw(#","terms":"#)
+            out.write(terms)
+            out.raw(#","slop":"#)
+            out.write(Int(slop))
+            out.raw("}")
+
         case .phrasePrefix(let field, let terms, let maxExpansions):
-            return ["type": "phrase_prefix", "field": field, "terms": terms,
-                    "max_expansions": Int(maxExpansions)]
+            out.raw(#"{"type":"phrase_prefix","field":"#)
+            out.write(field)
+            out.raw(#","terms":"#)
+            out.write(terms)
+            out.raw(#","max_expansions":"#)
+            out.write(Int(maxExpansions))
+            out.raw("}")
+
         case .range(let field, let lower, let upper):
-            var node: [String: Any] = ["type": "range", "field": field]
-            if let lower { node["lower"] = lower.jsonObject() }
-            if let upper { node["upper"] = upper.jsonObject() }
-            return node
+            out.raw(#"{"type":"range","field":"#)
+            out.write(field)
+            if let lower {
+                out.raw(#","lower":"#)
+                lower.write(into: &out)
+            }
+            if let upper {
+                out.raw(#","upper":"#)
+                upper.write(into: &out)
+            }
+            out.raw("}")
+
         case .boost(let query, let factor):
-            return ["type": "boost", "query": query.jsonObject(), "boost": Double(factor)]
+            out.raw(#"{"type":"boost","query":"#)
+            query.write(into: &out)
+            out.raw(#","boost":"#)
+            out.write(Double(factor))
+            out.raw("}")
+
         case .boolean(let must, let should, let mustNot, let minimum):
-            var clauses: [[String: Any]] = []
-            clauses += must.map { ["occur": "must", "query": $0.jsonObject()] }
-            clauses += should.map { ["occur": "should", "query": $0.jsonObject()] }
-            clauses += mustNot.map { ["occur": "must_not", "query": $0.jsonObject()] }
-            var node: [String: Any] = ["type": "boolean", "clauses": clauses]
-            if let minimum { node["minimum_should_match"] = minimum }
-            return node
+            out.raw(#"{"type":"boolean","clauses":["#)
+            var first = true
+            for (occur, queries) in [("must", must), ("should", should), ("must_not", mustNot)] {
+                for query in queries {
+                    if !first { out.raw(",") }
+                    first = false
+                    out.raw(#"{"occur":"#)
+                    out.write(occur)
+                    out.raw(#","query":"#)
+                    query.write(into: &out)
+                    out.raw("}")
+                }
+            }
+            out.raw("]")
+            optional("minimum_should_match", minimum) { $1.write($0) }
+            out.raw("}")
         }
     }
 
     /// Reject malformed nodes before they reach the engine:
-    ///  * non-finite `Double`/`Float` (NaN / ±∞) anywhere in the tree —
-    ///    `JSONSerialization` raises an *uncatchable* `NSException` on those, so
-    ///    we must catch them here. Otherwise a stray non-finite value crashes
-    ///    the process, or (before this) silently degraded to a match-all query
-    ///    that matched, or via `deleteDocuments(matching:)` *deleted*, every
-    ///    document.
+    ///  * non-finite `Double`/`Float` (NaN / ±∞) anywhere in the tree — JSON
+    ///    cannot represent them, and emitting a bare `nan` would fail in the
+    ///    engine's parser with a message that says nothing about which value
+    ///    caused it. (When this went through `JSONSerialization` the stakes were
+    ///    higher still: a non-finite value there raises an *uncatchable*
+    ///    `NSException`.)
     ///  * a range with neither bound — tantivy derives the range's field from a
     ///    bound term, so a fully unbounded range panics inside the engine.
     ///  * a negative `minimumShouldMatch` — the FFI layer would reject it; a
@@ -387,10 +497,9 @@ extension Query {
     /// never silently degrades to a match-all query.
     func jsonString() throws(TantivyError) -> String {
         try validate()
-        guard let data = try? JSONSerialization.data(withJSONObject: jsonObject()) else {
-            throw TantivyError.encoding("could not serialize query")
-        }
-        return String(decoding: data, as: UTF8.self)
+        var out = JSONWriter()
+        write(into: &out)
+        return out.text
     }
 }
 

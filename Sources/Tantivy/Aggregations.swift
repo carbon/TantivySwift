@@ -1,6 +1,29 @@
 import Foundation
 import CTantivy
 
+/// A bucket key from tantivy's aggregation result.
+///
+/// Aggregation results are the one part of the FFI still carried as tantivy's
+/// own JSON (it is the Elasticsearch-compatible format the engine defines), so
+/// this is the only place a ``FieldValue`` is built by `Codable`. Hits take the
+/// MessagePack path instead. A facet key is always a string or a number —
+/// grouping by a `bytes` field is not something tantivy's terms aggregation
+/// produces — so there is no byte case here.
+private struct AggregationKey: Decodable {
+    let value: FieldValue
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let b = try? c.decode(Bool.self) { value = .bool(b); return }
+        if let i = try? c.decode(Int64.self) { value = .int(i); return }
+        if let u = try? c.decode(UInt64.self) { value = .unsigned(u); return }
+        if let d = try? c.decode(Double.self) { value = .double(d); return }
+        if let s = try? c.decode(String.self) { value = .string(s); return }
+        throw DecodingError.dataCorruptedError(
+            in: c, debugDescription: "unsupported aggregation bucket key")
+    }
+}
+
 /// One bucket of a term-counts (facet) aggregation: a field value and how many
 /// matching documents carry it.
 public struct FacetCount: Sendable, Equatable {
@@ -30,18 +53,20 @@ extension Index {
         // and surfaces as an opaque serde message; reject it here as `search`
         // does for `limit`.
         if limit < 0 { throw .encoding("limit must be non-negative (got \(limit))") }
-        let request: [String: Any] = ["counts": ["terms": ["field": field, "size": limit]]]
-        guard let data = try? JSONSerialization.data(withJSONObject: request) else {
-            throw .encoding("could not serialize aggregation request")
-        }
-        let result = try aggregate(String(decoding: data, as: UTF8.self), matching: query)
+        var request = JSONWriter()
+        request.raw(#"{"counts":{"terms":{"field":"#)
+        request.write(field)
+        request.raw(#","size":"#)
+        request.write(limit)
+        request.raw("}}}")
+        let result = try aggregate(request.text, matching: query)
 
         struct TermsResult: Decodable {
             struct Buckets: Decodable {
                 let buckets: [Bucket]
             }
             struct Bucket: Decodable {
-                let key: FieldValue
+                let key: AggregationKey
                 let docCount: Int
                 enum CodingKeys: String, CodingKey {
                     case key
@@ -52,7 +77,7 @@ extension Index {
         }
         do {
             let decoded = try JSONDecoder().decode(TermsResult.self, from: Data(result.utf8))
-            return decoded.counts.buckets.map { FacetCount(value: $0.key, count: $0.docCount) }
+            return decoded.counts.buckets.map { FacetCount(value: $0.key.value, count: $0.docCount) }
         } catch {
             throw TantivyError.encoding("could not decode aggregation result: \(error)")
         }
@@ -73,9 +98,8 @@ extension Index {
         // whatever prefix happened to parse and silently dropping the rest.
         try Self.validateNoInteriorNUL(aggregationsJSON, "aggregation request")
         var err: UnsafeMutablePointer<CChar>?
-        let qjson = try query.jsonString()
         let raw: UnsafeMutablePointer<CChar>? =
-            qjson.withCString { qC in
+            try query.jsonString().withCString { qC in
                 aggregationsJSON.withCString { aC in
                     tantivy_index_aggregate(handle, qC, aC, &err)
                 }

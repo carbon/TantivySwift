@@ -19,6 +19,25 @@ extern "C" {
 typedef struct CIndex CIndex;
 typedef struct CWriter CWriter;
 
+/* ---- bytes ----
+ *
+ * Documents and hits are MessagePack, which has a native byte-string type, so
+ * `bytes` fields carry their values directly. Query trees are still JSON, where
+ * a byte string cannot be represented, so a byte value in a `term` or `range`
+ * node is base64 — a cost paid once per search on a payload of a few hundred
+ * bytes.
+ */
+
+/* A search result: the MessagePack hit envelope. Free with
+ * tantivy_result_free(). */
+typedef struct CResult CResult;
+
+/* Borrowed from the result and valid until tantivy_result_free(); never passed
+ * to tantivy_string_free(). Returns NULL when the payload is empty. */
+const uint8_t *tantivy_result_bytes(const CResult *result);
+size_t tantivy_result_len(const CResult *result);
+void tantivy_result_free(CResult *result);
+
 /* ---- index lifecycle ---- */
 
 /* Open or create an index. `path` NULL/empty -> in-RAM. `reload_on_commit`
@@ -51,6 +70,15 @@ int tantivy_writer_add_json(CWriter *writer,
                             const char *doc_json,
                             char **out_error);
 
+/* Add one document from a MessagePack map of {field name: [values]}. Values are
+ * read by the field's declared type, so nothing is guessed; byte values are
+ * native MessagePack byte strings. This is the path every typed Swift API
+ * takes. 0 ok, -1 error. */
+int tantivy_writer_add_msgpack(CWriter *writer,
+                               const uint8_t *payload,
+                               size_t len,
+                               char **out_error);
+
 /* Commit queued ops. Returns opstamp, or -1 on error. */
 int64_t tantivy_writer_commit(CWriter *writer, char **out_error);
 
@@ -70,6 +98,17 @@ int tantivy_writer_delete_term(CWriter *writer,
                                const char *field,
                                const char *value_json,
                                char **out_error);
+
+/*
+ * The byte-array counterpart of tantivy_writer_delete_term, and the primitive
+ * behind upsert on a binary key. `field` must be a `bytes` field; `value` may
+ * be NULL when `len` is 0. Effective on next commit. 0 ok, -1 error.
+ */
+int tantivy_writer_delete_term_bytes(CWriter *writer,
+                                     const char *field,
+                                     const uint8_t *value,
+                                     size_t len,
+                                     char **out_error);
 
 /*
  * Delete all documents matching a structured query (same JSON grammar as
@@ -107,10 +146,11 @@ char *tantivy_index_stats(CIndex *index, char **out_error);
 /* ---- searching ---- */
 
 /*
- * Run `query` and return up to `limit` hits as a JSON string:
+ * Run `query` and return up to `limit` hits, MessagePack-encoded:
  *   {"hits":[{"score":1.23,"doc":{"title":["..."],"id":[7]}}, ...]}
+ * where a stored `bytes` value is a native MessagePack byte string.
  * `default_fields_csv` NULL/empty -> all indexed text fields.
- * Returns a heap string (free with tantivy_string_free), or NULL on error.
+ * Returns a CResult (free with tantivy_result_free), or NULL on error.
  */
 /* snippet_fields_csv: comma-separated stored text fields to highlight (NULL/empty
  * = none); snippet_max_chars: 0 = default. When set, each hit gains a "snippets"
@@ -118,31 +158,32 @@ char *tantivy_index_stats(CIndex *index, char **out_error);
  * order_by_field: NULL/empty = relevance order; otherwise sort by that numeric/
  * date fast field (order_ascending non-zero = ascending). Field-ordered hits
  * carry score 0. */
-char *tantivy_index_search(CIndex *index,
-                           const char *query,
-                           const char *default_fields_csv,
-                           const char *boosts_json,
-                           const char *snippet_fields_csv,
-                           size_t snippet_max_chars,
-                           size_t limit,
-                           const char *order_by_field,
-                           int order_ascending,
-                           char **out_error);
+CResult *tantivy_index_search(CIndex *index,
+                              const char *query,
+                              const char *default_fields_csv,
+                              const char *boosts_json,
+                              const char *snippet_fields_csv,
+                              size_t snippet_max_chars,
+                              size_t limit,
+                              const char *order_by_field,
+                              int order_ascending,
+                              char **out_error);
 
 /*
  * Run a structured query (a JSON query tree mirroring tantivy's Query types:
  * all / parsed / term / fuzzy / regex / phrase / phrase_prefix / range /
- * boost / boolean). Same hit envelope as tantivy_index_search. Returns a heap
- * string (free with tantivy_string_free), or NULL on error.
+ * boost / boolean). Values for `bytes` fields appear
+ * as base64. Same hit envelope as tantivy_index_search. Returns a
+ * CResult (free with tantivy_result_free), or NULL on error.
  */
-char *tantivy_index_search_query(CIndex *index,
-                                 const char *query_json,
-                                 const char *snippet_fields_csv,
-                                 size_t snippet_max_chars,
-                                 size_t limit,
-                                 const char *order_by_field,
-                                 int order_ascending,
-                                 char **out_error);
+CResult *tantivy_index_search_query(CIndex *index,
+                                    const char *query_json,
+                                    const char *snippet_fields_csv,
+                                    size_t snippet_max_chars,
+                                    size_t limit,
+                                    const char *order_by_field,
+                                    int order_ascending,
+                                    char **out_error);
 
 /*
  * Count matches without loading documents. tantivy_index_count takes a string

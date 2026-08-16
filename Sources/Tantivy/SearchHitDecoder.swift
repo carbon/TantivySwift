@@ -36,6 +36,10 @@ private enum Convert {
         if case .string(let s) = v, let d = DateParsing.date(from: s) { return d }
         throw mismatch(Date.self, v, path)
     }
+    static func data(_ v: FieldValue, _ path: [CodingKey]) throws -> Data {
+        if case .bytes(let d) = v { return d }
+        throw mismatch(Data.self, v, path)
+    }
     static func double(_ v: FieldValue, _ path: [CodingKey]) throws -> Double {
         switch v {
         case .double(let d): return d
@@ -152,6 +156,9 @@ private struct FieldsKeyed<Key: CodingKey>: KeyedDecodingContainerProtocol {
 
     func decode<T: Decodable>(_ type: T.Type, forKey key: Key) throws -> T {
         if type == Date.self { return try Convert.date(first(key), path(key)) as! T }
+        // `Data`'s own Decodable conformance reads an unkeyed container of
+        // bytes; a stored bytes value is one whole value, so intercept it.
+        if type == Data.self { return try Convert.data(first(key), path(key)) as! T }
         return try T(from: FieldDecoder(values: values(key), codingPath: path(key)))
     }
 
@@ -222,6 +229,7 @@ private struct FieldUnkeyed: UnkeyedDecodingContainer {
     mutating func decode<T: Decodable>(_ type: T.Type) throws -> T {
         let v = try next()
         if type == Date.self { return try Convert.date(v, codingPath) as! T }
+        if type == Data.self { return try Convert.data(v, codingPath) as! T }
         return try T(from: FieldDecoder(values: [v], codingPath: codingPath))
     }
 
@@ -268,6 +276,7 @@ private struct FieldSingle: SingleValueDecodingContainer {
     func decode(_ type: UInt64.Type) throws -> UInt64 { try Convert.uint64(req(), codingPath) }
     func decode<T: Decodable>(_ type: T.Type) throws -> T {
         if type == Date.self { return try Convert.date(req(), codingPath) as! T }
+        if type == Data.self { return try Convert.data(req(), codingPath) as! T }
         return try T(from: FieldDecoder(values: value.map { [$0] } ?? [], codingPath: codingPath))
     }
 }

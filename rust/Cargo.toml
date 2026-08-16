@@ -13,8 +13,13 @@ crate-type = ["staticlib"]
 # Pinned to the exact tantivy 0.26.1 release from crates.io.
 tantivy = "=0.26.1"
 serde_json = "1"
-# RFC3339 parsing for date terms/ranges in the structured query API.
-time = { version = "0.3", features = ["parsing"] }
+# Byte values in a *query* tree are base64 (queries are JSON; documents and hits
+# are MessagePack and carry bytes natively). Already in the tree via tantivy.
+base64 = "0.22"
+# RFC3339 parsing for date terms/ranges in the structured query API, and
+# formatting so the MessagePack envelope renders dates identically to the JSON
+# one (which gets it from tantivy's own serde impl).
+time = { version = "0.3", features = ["parsing", "formatting"] }
 
 [profile.release]
 opt-level = 3

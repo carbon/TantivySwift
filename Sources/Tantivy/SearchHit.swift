@@ -11,6 +11,8 @@ public enum FieldValue: Equatable, Sendable, CustomStringConvertible {
     case unsigned(UInt64)
     case double(Double)
     case bool(Bool)
+    /// A stored `bytes` value, exactly as indexed.
+    case bytes(Data)
 
     public var description: String {
         switch self {
@@ -19,29 +21,8 @@ public enum FieldValue: Equatable, Sendable, CustomStringConvertible {
         case .unsigned(let u): return String(u)
         case .double(let d): return String(d)
         case .bool(let b): return String(b)
+        case .bytes(let d): return "\(d.count) bytes"
         }
-    }
-}
-
-extension FieldValue: Decodable {
-    /// Decode a single JSON scalar from tantivy's result, preserving exact
-    /// integer precision across the full `i64` and `u64` ranges.
-    ///
-    /// Order matters: `Bool` first (Foundation's `JSONDecoder` accepts only
-    /// `true`/`false` here, never `0`/`1`), then `Int64`, then `UInt64` for
-    /// values above `Int64.max`, then `Double`, then `String`. A whole-valued
-    /// `f64` such as `4.0` is categorized as `.int(4)`; read numeric fields
-    /// through the accessors (`double`, `int`, `uint`), which coerce, rather
-    /// than pattern-matching the raw case.
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.singleValueContainer()
-        if let b = try? c.decode(Bool.self) { self = .bool(b); return }
-        if let i = try? c.decode(Int64.self) { self = .int(i); return }
-        if let u = try? c.decode(UInt64.self) { self = .unsigned(u); return }
-        if let d = try? c.decode(Double.self) { self = .double(d); return }
-        if let s = try? c.decode(String.self) { self = .string(s); return }
-        throw DecodingError.dataCorruptedError(
-            in: c, debugDescription: "unsupported tantivy field value")
     }
 }
 
@@ -116,6 +97,12 @@ public struct SearchHit: Sendable {
     /// First boolean value of `name`, if any.
     public func bool(_ name: String) -> Bool? {
         for v in self[name] { if case .bool(let b) = v { return b } }
+        return nil
+    }
+
+    /// First `bytes` value of `name`, if any.
+    public func data(_ name: String) -> Data? {
+        for v in self[name] { if case .bytes(let d) = v { return d } }
         return nil
     }
 }
