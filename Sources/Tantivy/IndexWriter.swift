@@ -23,39 +23,35 @@ public final class IndexWriter {
     /// Add a document from a dictionary of `field name → value`.
     /// Values may be scalars or arrays (for multi-valued fields):
     /// `["title": "Hi", "tags": ["a", "b"], "id": 7]`.
+    ///
+    /// `Data` values target a `bytes` field and are sent as raw bytes.
     public func addDocument(_ fields: [String: Any]) throws(TantivyError) {
-        guard Self.allFinite(fields) else {
-            throw TantivyError.encoding("document contains a non-finite number (NaN/±∞)")
-        }
-        let data: Data
-        do {
-            data = try JSONSerialization.data(withJSONObject: fields)
-        } catch {
-            throw TantivyError.encoding("could not serialize document: \(error)")
-        }
-        try addDocument(json: String(decoding: data, as: UTF8.self))
+        try addDocument(messagePack: MessagePackWriter.document(fields))
     }
 
-    /// True if no `Double`/`Float` anywhere in `value` is non-finite. Guards the
-    /// `[String: Any]` add path: a NaN/±∞ would otherwise raise an *uncatchable*
-    /// `NSException` from `JSONSerialization`, crashing the process.
-    private static func allFinite(_ value: Any) -> Bool {
-        switch value {
-        case let d as Double: return d.isFinite
-        case let f as Float: return f.isFinite
-        case let array as [Any]: return array.allSatisfy(allFinite)
-        case let dict as [String: Any]: return dict.values.allSatisfy(allFinite)
-        default: return true
-        }
+    /// Add a document whose fields are *all* byte values.
+    ///
+    /// This exists to disambiguate: a dictionary literal of nothing but `Data`
+    /// infers as `[String: Data]`, which is `Encodable`, so without this overload
+    /// it would bind to ``addDocument(_:)-(T)`` and route the document through
+    /// JSON instead.
+    public func addDocument(_ fields: [String: Data]) throws(TantivyError) {
+        try addDocument(fields as [String: Any])
     }
 
     /// Add a document from an `Encodable` value. `Date` properties are encoded as
     /// RFC3339 strings so they land in `date` fields.
+    ///
+    /// > This is the one add path that still goes through JSON, since that is
+    /// > what `JSONEncoder` produces. `Data` properties are base64-encoded and
+    /// > decoded back by the engine — correct, but it costs an encode and a
+    /// > decode. Use ``Document`` or the `[String: Any]` overload to avoid both.
     public func addDocument<T: Encodable>(_ value: T) throws(TantivyError) {
         let data: Data
         do {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
+            encoder.dataEncodingStrategy = .base64
             data = try encoder.encode(value)
         } catch {
             throw TantivyError.encoding("could not encode document: \(error)")
@@ -63,10 +59,20 @@ public final class IndexWriter {
         try addDocument(json: String(decoding: data, as: UTF8.self))
     }
 
-    /// Add a document from a raw JSON object string.
+    /// Add a document from a raw JSON object string — the escape hatch for JSON
+    /// you already have. Everything else takes the MessagePack path.
     public func addDocument(json: String) throws(TantivyError) {
         var err: UnsafeMutablePointer<CChar>?
         let rc = json.withCString { tantivy_writer_add_json(handle, $0, &err) }
+        if rc != 0 { throw TantivyError.take(&err, fallback: "add document failed") }
+    }
+
+    /// Add a document from an encoded MessagePack payload.
+    func addDocument(messagePack payload: [UInt8]) throws(TantivyError) {
+        var err: UnsafeMutablePointer<CChar>?
+        let rc = payload.withUnsafeBufferPointer {
+            tantivy_writer_add_msgpack(handle, $0.baseAddress, $0.count, &err)
+        }
         if rc != 0 { throw TantivyError.take(&err, fallback: "add document failed") }
     }
 
@@ -115,7 +121,7 @@ public final class IndexWriter {
     /// value. On a tokenized text field it matches a single token. Effective on
     /// the next commit.
     public func deleteDocuments(field: String, equals value: String) throws(TantivyError) {
-        try deleteTerm(field: field, valueJSON: Self.jsonString(value))
+        try deleteTerm(field: field, valueJSON: Self.jsonScalar(value))
     }
     public func deleteDocuments(field: String, equals value: Int64) throws(TantivyError) {
         try deleteTerm(field: field, valueJSON: String(value))
@@ -125,6 +131,23 @@ public final class IndexWriter {
     }
     public func deleteDocuments(field: String, equals value: Bool) throws(TantivyError) {
         try deleteTerm(field: field, valueJSON: value ? "true" : "false")
+    }
+
+    /// Delete documents whose `bytes` field `field` holds exactly `value` — the
+    /// upsert primitive for a binary key. The bytes are compared exactly, and
+    /// are sent as raw memory rather than base64-encoded.
+    public func deleteDocuments(field: String, equals value: Data) throws(TantivyError) {
+        try Index.validateNoInteriorNUL(field, "delete field name '\(field)'")
+        var err: UnsafeMutablePointer<CChar>?
+        let rc = field.withCString { fieldC in
+            value.withUnsafeBytes { buffer in
+                tantivy_writer_delete_term_bytes(
+                    handle, fieldC,
+                    buffer.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    buffer.count, &err)
+            }
+        }
+        if rc != 0 { throw TantivyError.take(&err, fallback: "delete term failed") }
     }
 
     /// Delete documents whose `field` equals any of `values` — a multi-term
@@ -143,6 +166,10 @@ public final class IndexWriter {
         guard !values.isEmpty else { return }
         try deleteDocuments(matching: .anyOf(values.map { .term(field, $0) }))
     }
+    public func deleteDocuments(field: String, equalsAnyOf values: [Data]) throws(TantivyError) {
+        guard !values.isEmpty else { return }
+        try deleteDocuments(matching: .anyOf(values.map { .term(field, $0) }))
+    }
 
     // MARK: - Delete by query
 
@@ -156,8 +183,7 @@ public final class IndexWriter {
     /// > tokens exactly; on a tokenized text field pass already-analyzed tokens.
     public func deleteDocuments(matching query: Query) throws(TantivyError) {
         var err: UnsafeMutablePointer<CChar>?
-        let qjson = try query.jsonString()
-        let rc = qjson.withCString {
+        let rc = try query.jsonString().withCString {
             tantivy_writer_delete_query(handle, $0, &err)
         }
         if rc != 0 { throw TantivyError.take(&err, fallback: "delete query failed") }
@@ -192,6 +218,13 @@ public final class IndexWriter {
         }
     }
 
+    /// A Swift string as a JSON string literal, quoted and escaped.
+    private static func jsonScalar(_ value: String) -> String {
+        var out = JSONWriter(reservingCapacity: value.utf8.count + 2)
+        out.write(value)
+        return out.text
+    }
+
     private func deleteTerm(field: String, valueJSON: String) throws(TantivyError) {
         // The field name crosses as a C string: an interior NUL would truncate
         // it, and whenever the prefix is itself a valid field name the delete
@@ -205,27 +238,5 @@ public final class IndexWriter {
             }
         }
         if rc != 0 { throw TantivyError.take(&err, fallback: "delete term failed") }
-    }
-
-    /// Encode a Swift string as a JSON string literal (quoted + escaped).
-    private static func jsonString(_ s: String) -> String {
-        var out = "\""
-        for scalar in s.unicodeScalars {
-            switch scalar {
-            case "\"": out += "\\\""
-            case "\\": out += "\\\\"
-            case "\n": out += "\\n"
-            case "\r": out += "\\r"
-            case "\t": out += "\\t"
-            default:
-                if scalar.value < 0x20 {
-                    out += String(format: "\\u%04x", scalar.value)
-                } else {
-                    out.unicodeScalars.append(scalar)
-                }
-            }
-        }
-        out += "\""
-        return out
     }
 }

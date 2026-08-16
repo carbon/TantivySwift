@@ -149,7 +149,7 @@ public final class Index: @unchecked Sendable {
         let csv = fields.joined(separator: ",")
         let boostsJSON = try Self.boostsJSON(boosts)
         let snipCSV = highlight.joined(separator: ",")
-        let raw: UnsafeMutablePointer<CChar>? =
+        let result: OpaquePointer? =
             query.withCString { qC in
                 withOptionalCString(csv) { fC in
                     withOptionalCString(boostsJSON) { bC in
@@ -163,9 +163,8 @@ public final class Index: @unchecked Sendable {
                     }
                 }
             }
-        guard let raw else { throw TantivyError.take(&err, fallback: "search failed") }
-        defer { tantivy_string_free(raw) }
-        return try Self.decodeHits(Data(bytes: raw, count: strlen(raw)))
+        guard let result else { throw TantivyError.take(&err, fallback: "search failed") }
+        return try Self.decodeHits(result)
     }
 
     /// Run a structured ``Query`` (the typed builder that mirrors tantivy's own
@@ -186,7 +185,7 @@ public final class Index: @unchecked Sendable {
         var err: UnsafeMutablePointer<CChar>?
         let qjson = try query.jsonString()
         let snipCSV = highlight.joined(separator: ",")
-        let raw: UnsafeMutablePointer<CChar>? =
+        let result: OpaquePointer? =
             qjson.withCString { qC in
                 withOptionalCString(snipCSV) { sC in
                     withOptionalCString(orderBy?.field ?? "") { oC in
@@ -196,9 +195,23 @@ public final class Index: @unchecked Sendable {
                     }
                 }
             }
-        guard let raw else { throw TantivyError.take(&err, fallback: "search failed") }
-        defer { tantivy_string_free(raw) }
-        return try Self.decodeHits(Data(bytes: raw, count: strlen(raw)))
+        guard let result else { throw TantivyError.take(&err, fallback: "search failed") }
+        return try Self.decodeHits(result)
+    }
+
+    /// The raw wire payload for a query, without decoding it. For measuring
+    /// the encoding; not public API.
+    func rawSearchPayload(_ query: Query, limit: Int = 10) throws(TantivyError) -> Data {
+        var err: UnsafeMutablePointer<CChar>?
+        let result: OpaquePointer? = try query.jsonString().withCString { qC in
+            tantivy_index_search_query(handle, qC, nil, 0, limit, nil, 0, &err)
+        }
+        guard let result else { throw TantivyError.take(&err, fallback: "search failed") }
+        defer { tantivy_result_free(result) }
+
+        let length = tantivy_result_len(result)
+        guard length > 0, let base = tantivy_result_bytes(result) else { return Data() }
+        return Data(bytes: base, count: length)
     }
 
     // MARK: - Counting
@@ -228,8 +241,9 @@ public final class Index: @unchecked Sendable {
     /// Number of documents matching a structured ``Query`` (no documents loaded).
     public func count(_ query: Query) throws(TantivyError) -> Int {
         var err: UnsafeMutablePointer<CChar>?
-        let qjson = try query.jsonString()
-        let n = qjson.withCString { tantivy_index_count_query(handle, $0, &err) }
+        let n = try query.jsonString().withCString {
+            tantivy_index_count_query(handle, $0, &err)
+        }
         if n < 0 { throw TantivyError.take(&err, fallback: "count failed") }
         return Int(n)
     }
@@ -276,7 +290,10 @@ public final class Index: @unchecked Sendable {
 
     // MARK: - Result decoding
 
-    private static func boostsJSON(_ boosts: [String: Double]) throws(TantivyError) -> String {
+    // Internal rather than private so the encoding can be tested directly;
+    // escaping bugs here are silent, and a search with boosts would still
+    // return plausible results.
+    static func boostsJSON(_ boosts: [String: Double]) throws(TantivyError) -> String {
         guard !boosts.isEmpty else { return "" }
         for (field, value) in boosts where !value.isFinite {
             throw .encoding("non-finite boost for field '\(field)' (NaN/±∞)")
@@ -287,30 +304,34 @@ public final class Index: @unchecked Sendable {
         for field in boosts.keys {
             try validateNoInteriorNUL(field, "boost field name '\(field)'")
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: boosts) else {
-            throw .encoding("could not serialize boosts")
+        var out = JSONWriter()
+        out.raw("{")
+        // Sorted so the payload is stable across runs; dictionaries iterate in
+        // hash order, which made identical requests serialize differently.
+        for (index, field) in boosts.keys.sorted().enumerated() {
+            if index > 0 { out.raw(",") }
+            out.write(field)
+            out.raw(":")
+            out.write(boosts[field]!)
         }
-        return String(decoding: data, as: UTF8.self)
+        out.raw("}")
+        return out.text
     }
 
-    /// Wire shape of the search JSON envelope. Decoded with `JSONDecoder` (not
-    /// `JSONSerialization`) so integers keep exact precision across the full
-    /// i64/u64 range — see `FieldValue.init(from:)`.
-    private struct SearchResponse: Decodable {
-        struct Hit: Decodable {
-            let score: Float
-            let doc: [String: [FieldValue]]
-            let snippets: [String: String]?
-        }
-        let hits: [Hit]
-    }
+    /// Decode a `CResult` — the MessagePack hit envelope — and release it.
+    ///
+    /// The payload is read in place, straight off the Rust allocation: values
+    /// become `SearchHit`s with no intermediate representation and no `Codable`
+    /// in between. Both were the dominant cost of the JSON envelope this
+    /// replaced.
+    private static func decodeHits(_ result: OpaquePointer) throws(TantivyError) -> [SearchHit] {
+        defer { tantivy_result_free(result) }
 
-    private static func decodeHits(_ data: Data) throws(TantivyError) -> [SearchHit] {
+        let length = tantivy_result_len(result)
+        guard length > 0, let base = tantivy_result_bytes(result) else { return [] }
         do {
-            let resp = try JSONDecoder().decode(SearchResponse.self, from: data)
-            return resp.hits.map {
-                SearchHit(score: $0.score, fields: $0.doc, snippets: $0.snippets ?? [:])
-            }
+            return try MessagePackReader.decodeHits(
+                UnsafeRawBufferPointer(start: base, count: length))
         } catch {
             throw TantivyError.encoding("could not decode search response: \(error)")
         }

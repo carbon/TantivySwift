@@ -49,7 +49,48 @@ public enum Analyzer: String, Sendable, CaseIterable {
 ///     .build()
 /// ```
 public final class SchemaBuilder {
-    private var fields: [[String: Any]] = []
+    /// One field's specification.
+    ///
+    /// Typed rather than a `[String: Any]` so `build()` cannot fail: there is no
+    /// value here that a serializer could reject, which is what let the previous
+    /// implementation fall back to an *empty* schema on error. That fallback was
+    /// unreachable in practice, but it turned a serialization problem into
+    /// "unknown field" errors at every later `addDocument`, arbitrarily far from
+    /// the cause.
+    private struct FieldSpec {
+        let name: String
+        let type: String
+        let stored: Bool
+        let indexed: Bool
+        let fast: Bool
+        /// Text fields only; nil elsewhere.
+        var tokenizer: String?
+        var record: String?
+
+        func write(into out: inout JSONWriter) {
+            out.raw(#"{"name":"#)
+            out.write(name)
+            out.raw(#","type":"#)
+            out.write(type)
+            out.raw(#","stored":"#)
+            out.write(stored)
+            out.raw(#","indexed":"#)
+            out.write(indexed)
+            out.raw(#","fast":"#)
+            out.write(fast)
+            if let tokenizer {
+                out.raw(#","tokenizer":"#)
+                out.write(tokenizer)
+            }
+            if let record {
+                out.raw(#","record":"#)
+                out.write(record)
+            }
+            out.raw("}")
+        }
+    }
+
+    private var fields: [FieldSpec] = []
 
     public init() {}
 
@@ -70,10 +111,9 @@ public final class SchemaBuilder {
         indexing: TextIndexing = .position,
         fast: Bool = false
     ) -> SchemaBuilder {
-        fields.append([
-            "name": name, "type": "text", "stored": stored, "indexed": indexed,
-            "tokenizer": tokenizer.rawValue, "record": indexing.rawValue, "fast": fast,
-        ])
+        fields.append(FieldSpec(
+            name: name, type: "text", stored: stored, indexed: indexed, fast: fast,
+            tokenizer: tokenizer.rawValue, record: indexing.rawValue))
         return self
     }
 
@@ -86,9 +126,8 @@ public final class SchemaBuilder {
         indexed: Bool = true,
         fast: Bool = false
     ) -> SchemaBuilder {
-        fields.append([
-            "name": name, "type": "string", "stored": stored, "indexed": indexed, "fast": fast,
-        ])
+        fields.append(FieldSpec(
+            name: name, type: "string", stored: stored, indexed: indexed, fast: fast))
         return self
     }
 
@@ -128,9 +167,40 @@ public final class SchemaBuilder {
     public func addDateField(
         _ name: String, stored: Bool = false, indexed: Bool = true, fast: Bool = false
     ) -> SchemaBuilder {
-        fields.append([
-            "name": name, "type": "date", "stored": stored, "indexed": indexed, "fast": fast,
-        ])
+        fields.append(FieldSpec(
+            name: name, type: "date", stored: stored, indexed: indexed, fast: fast))
+        return self
+    }
+
+    /// Add an opaque byte-string field — the byte-array analogue of
+    /// ``addStringField(_:stored:indexed:fast:)``, and the type to use for a
+    /// binary id or key (a UUID, a hash, a packed struct).
+    ///
+    /// Indexed, the whole value is a single term matched byte-for-byte, so
+    /// ``Query/term(_:_:)-(_,Data)`` and
+    /// ``IndexWriter/deleteDocuments(field:equals:)-(_,Data)`` do exact lookups
+    /// and upserts on it. Values carry any bytes at all — NULs, invalid UTF-8 —
+    /// and cross to the engine as raw memory rather than being base64-encoded.
+    ///
+    /// ```swift
+    /// let schema = SchemaBuilder()
+    ///     .addBytesField("key", stored: true, indexed: true)
+    ///     .addTextField("body")
+    ///     .build()
+    /// ```
+    ///
+    /// > Byte fields are not reachable from the query-string API (there is no
+    /// > way to write arbitrary bytes in a query string) — use the structured
+    /// > ``Query`` API.
+    @discardableResult
+    public func addBytesField(
+        _ name: String,
+        stored: Bool = false,
+        indexed: Bool = true,
+        fast: Bool = false
+    ) -> SchemaBuilder {
+        fields.append(FieldSpec(
+            name: name, type: "bytes", stored: stored, indexed: indexed, fast: fast))
         return self
     }
 
@@ -138,16 +208,20 @@ public final class SchemaBuilder {
     private func addNumeric(
         _ name: String, _ type: String, _ stored: Bool, _ indexed: Bool, _ fast: Bool
     ) -> SchemaBuilder {
-        fields.append([
-            "name": name, "type": type, "stored": stored, "indexed": indexed, "fast": fast,
-        ])
+        fields.append(FieldSpec(
+            name: name, type: type, stored: stored, indexed: indexed, fast: fast))
         return self
     }
 
-    /// Finalize the schema.
+    /// Finalize the schema. Cannot fail — see ``FieldSpec``.
     public func build() -> Schema {
-        let spec: [String: Any] = ["fields": fields]
-        let data = (try? JSONSerialization.data(withJSONObject: spec)) ?? Data("{\"fields\":[]}".utf8)
-        return Schema(json: String(decoding: data, as: UTF8.self))
+        var out = JSONWriter(reservingCapacity: 64 * max(fields.count, 1))
+        out.raw(#"{"fields":["#)
+        for (index, field) in fields.enumerated() {
+            if index > 0 { out.raw(",") }
+            field.write(into: &out)
+        }
+        out.raw("]}")
+        return Schema(json: out.text)
     }
 }

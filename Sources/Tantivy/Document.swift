@@ -10,6 +10,9 @@ public enum DocumentValue: Sendable {
     case double(Double)
     case bool(Bool)
     case date(Date)
+    /// A value for a `bytes` field. Unlike every other case this never enters
+    /// the JSON handed to the engine — it travels as raw memory alongside it.
+    case bytes(Data)
     case array([DocumentValue])
 }
 
@@ -27,29 +30,6 @@ extension DocumentValue: ExpressibleByBooleanLiteral {
 }
 extension DocumentValue: ExpressibleByArrayLiteral {
     public init(arrayLiteral elements: DocumentValue...) { self = .array(elements) }
-}
-
-extension DocumentValue {
-    fileprivate func jsonValue() -> Any {
-        switch self {
-        case .string(let s): return s
-        case .int(let i): return i
-        case .unsigned(let u): return u
-        case .double(let d): return d
-        case .bool(let b): return b
-        case .date(let date): return date.formatted(.iso8601)
-        case .array(let values): return values.map { $0.jsonValue() }
-        }
-    }
-
-    /// False if this value (or any element) is a non-finite `Double` (NaN/±∞).
-    fileprivate var isFinite: Bool {
-        switch self {
-        case .double(let d): return d.isFinite
-        case .array(let values): return values.allSatisfy(\.isFinite)
-        default: return true
-        }
-    }
 }
 
 /// A document built with typed values, supporting `Date` and multi-valued fields
@@ -79,25 +59,29 @@ public struct Document: Sendable {
     /// Set a `Date` value (dates aren't expressible as a literal).
     public mutating func set(_ field: String, _ date: Date) { fields[field] = .date(date) }
 
-    /// The JSON object handed to the FFI (dates rendered as RFC3339). Throws on a
-    /// non-finite number rather than letting `JSONSerialization` raise an
-    /// uncatchable `NSException`.
-    func jsonString() throws(TantivyError) -> String {
-        for (name, value) in fields where !value.isFinite {
-            throw TantivyError.encoding("field '\(name)' has a non-finite number (NaN/±∞)")
+    /// Set a `bytes` value (`Data` isn't expressible as a literal either).
+    public mutating func set(_ field: String, _ data: Data) { fields[field] = .bytes(data) }
+
+    /// The MessagePack payload handed to the FFI. Every value type — dates as
+    /// RFC3339 strings, bytes as native byte strings — travels in one buffer.
+    func encoded() throws(TantivyError) -> [UInt8] {
+        var normalized: [String: [DocumentValue]] = [:]
+        normalized.reserveCapacity(fields.count)
+        for (name, value) in fields {
+            if case .array(let values) = value {
+                normalized[name] = values
+            } else {
+                normalized[name] = [value]
+            }
         }
-        let object = fields.mapValues { $0.jsonValue() }
-        guard let data = try? JSONSerialization.data(withJSONObject: object) else {
-            throw TantivyError.encoding("could not serialize document")
-        }
-        return String(decoding: data, as: UTF8.self)
+        return try MessagePackWriter.document(normalized)
     }
 }
 
 extension IndexWriter {
-    /// Add a typed `Document` (handles `Date` and multi-valued fields).
+    /// Add a typed `Document` (handles `Date`, `Data`, and multi-valued fields).
     public func addDocument(_ document: Document) throws(TantivyError) {
-        try addDocument(json: document.jsonString())
+        try addDocument(messagePack: document.encoded())
     }
 }
 
