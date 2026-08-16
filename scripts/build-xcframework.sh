@@ -20,6 +20,20 @@ if ! xcodebuild -version >/dev/null 2>&1; then
 fi
 echo "==> Using $(xcodebuild -version | head -1) ($(xcode-select -p))"
 
+# --- single-instance lock ----------------------------------------------------
+# Two concurrent runs share rust/target and both race to delete and recreate
+# $OUT, which can leave a half-written xcframework for release.sh to publish.
+# cargo locks its own build directory, but nothing guards the assembly step.
+# mkdir is atomic everywhere; flock is not available on stock macOS.
+LOCK="$ROOT/.xcframework-build.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "error: another xcframework build is already running." >&2
+  echo "       lock: $LOCK" >&2
+  echo "       if no build is running, the lock is stale: rmdir '$LOCK'" >&2
+  exit 1
+fi
+trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+
 # Deployment targets baked into the object files; match Package.swift's platforms.
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
 export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-18.0}"

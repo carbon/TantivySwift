@@ -7,8 +7,11 @@
 # checksum-verifies it (no committed binary, no Git LFS).
 #
 # Usage:
-#   scripts/release.sh <version> [--yes]
+#   scripts/release.sh <version> [--yes] [--allow-branch]
 #   e.g.  scripts/release.sh 0.1.1
+#
+#   --yes           skip the confirmation prompt
+#   --allow-branch  permit releasing from a branch other than main
 #
 # Requirements (run on macOS, from a clean checkout):
 #   * full Xcode (for scripts/build-xcframework.sh) — if your active developer
@@ -19,6 +22,11 @@
 #
 # The tag and the release asset are created together (via `gh release create`),
 # so there is no window where Package.swift points at a URL that 404s.
+#
+# The test suite runs against the freshly built xcframework before anything is
+# committed or published: with artifacts/ present, Package.swift resolves the
+# local binary target, so the tests exercise the exact artifact that will ship —
+# including its bundled ctantivy.h, which is where an ABI break would hide.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -29,11 +37,20 @@ XCF="artifacts/CTantivy.xcframework"
 
 # --- args -------------------------------------------------------------------
 VERSION="${1:-}"
+shift || true
 ASSUME_YES=0
-[ "${2:-}" = "--yes" ] && ASSUME_YES=1
+ALLOW_BRANCH=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --yes)          ASSUME_YES=1 ;;
+    --allow-branch) ALLOW_BRANCH=1 ;;
+    *) echo "error: unknown option '$1'" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 if [ -z "$VERSION" ]; then
-  echo "usage: scripts/release.sh <version> [--yes]   (e.g. 0.1.1)" >&2
+  echo "usage: scripts/release.sh <version> [--yes] [--allow-branch]   (e.g. 0.1.1)" >&2
   exit 2
 fi
 if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'; then
@@ -56,8 +73,17 @@ if [ -n "$(git status --porcelain)" ]; then
   echo "error: working tree is dirty — commit or stash before releasing." >&2
   exit 1
 fi
+# Releasing off main is a hard error, not a warning. A tag cut from a feature
+# branch that is later squash-merged points at a commit reachable only from the
+# deleted branch: `git describe` breaks and the release cannot be found from
+# main's history.
+if [ "$BRANCH" != "main" ] && [ "$ALLOW_BRANCH" -ne 1 ]; then
+  echo "error: refusing to release from '$BRANCH' — expected 'main'." >&2
+  echo "       merge first, or pass --allow-branch if you are certain." >&2
+  exit 1
+fi
 if [ "$BRANCH" != "main" ]; then
-  echo "warning: releasing from '$BRANCH', not 'main'."
+  echo "warning: releasing from '$BRANCH', not 'main' (--allow-branch)."
 fi
 if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null 2>&1 \
    || git ls-remote --exit-code --tags origin "$VERSION" >/dev/null 2>&1; then
@@ -78,6 +104,12 @@ fi
 # --- build + package --------------------------------------------------------
 echo "==> Building xcframework (scripts/build-xcframework.sh)"
 scripts/build-xcframework.sh
+
+# --- verify before publishing -----------------------------------------------
+# artifacts/ now exists, so Package.swift is in local-binary mode and this runs
+# against the artifact itself rather than a host build.
+echo "==> Running tests against the built xcframework"
+swift test
 
 echo "==> Zipping $XCF -> $ASSET"
 rm -f "$ASSET"
@@ -113,6 +145,12 @@ gh release create "$VERSION" "$ASSET" \
 
 git fetch --tags origin >/dev/null 2>&1 || true
 rm -f "$ASSET"
+
+# Leaving artifacts/ behind would silently shadow later work: Package.swift
+# prefers a local xcframework over everything, so the next `swift test` in this
+# checkout would exercise the *released* binary instead of the working source.
+# Removing it falls back to downloading the release just published.
+rm -rf "$(dirname "$XCF")"
 
 echo
 echo "==> Released $VERSION"

@@ -5,6 +5,7 @@
 # Rust build output
 rust/target/
 .xcframework-build/
+.xcframework-build.lock/
 
 # Build artifacts — the xcframework is published as a GitHub Release asset by
 # scripts/release.sh, not committed.
