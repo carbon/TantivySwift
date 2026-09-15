@@ -42,6 +42,34 @@ struct StructuredQueryTests {
         #expect(titles(try corpus().search(.term("title", "old"))) == ["The Old Man"])
     }
 
+    /// Regression: `.term` built its leaf without term frequencies, so BM25
+    /// counted every match once and ranked unlike `.parsed` for the same token.
+    @Test func termScoresUseTermFrequency() throws {
+        let index = try Index.inMemory(schema: SchemaBuilder().addTextField("f", stored: true).build())
+        // Equal lengths, so only term frequency separates the scores.
+        try index.add(contentsOf: [["f": "apple apple apple zed"], ["f": "apple xen yak zed"]])
+
+        func scores(_ query: Query) throws -> [String: Float] {
+            var out: [String: Float] = [:]
+            for hit in try index.search(query) {
+                if let f = hit.string("f") { out[f] = hit.score }
+            }
+            return out
+        }
+        let term = try scores(.term("f", "apple"))
+        let repeated = try #require(term["apple apple apple zed"])
+        let once = try #require(term["apple xen yak zed"])
+        #expect(repeated > once)
+
+        for other in [Query.parsed("apple", fields: ["f"]), .phrase("f", ["apple"])] {
+            let expected = try scores(other)
+            #expect(Set(expected.keys) == Set(term.keys))
+            for (doc, score) in expected {
+                #expect(abs(score - term[doc]!) < 1e-4, "\(doc): term \(term[doc]!) ≠ \(score)")
+            }
+        }
+    }
+
     @Test func termOnRawStringIsExactAndCaseSensitive() throws {
         let index = try corpus()
         #expect(try index.search(.term("tag", "book")).count == 2)
