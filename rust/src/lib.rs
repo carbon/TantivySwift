@@ -22,7 +22,9 @@
 // Swift caller.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod keep_stem;
 mod msgpack;
+mod multi_phrase;
 
 use std::ffi::{c_char, CStr, CString};
 use std::os::raw::c_int;
@@ -49,7 +51,9 @@ use tantivy::schema::{
     Schema, TantivyDocument, Term, TextFieldIndexing, TextOptions,
 };
 use tantivy::snippet::SnippetGenerator;
-use tantivy::tokenizer::{LowerCaser, RawTokenizer, TextAnalyzer};
+use tantivy::tokenizer::{
+    LowerCaser, RawTokenizer, RemoveLongFilter, SimpleTokenizer, TextAnalyzer, TokenStream,
+};
 use tantivy::{DateTime, Index, IndexReader, IndexWriter, Order, ReloadPolicy};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -280,11 +284,20 @@ fn build_schema(spec: &str) -> Result<Schema, String> {
 /// tokenizer manager, so they must be re-registered every time an index is
 /// opened — the schema only persists the tokenizer *name* per field.
 ///
-///  * `lowercase` — one lowercased token per value, for case-insensitive exact
-///                  match (tags, authors, enums, ids)
+///  * `lowercase`    — one lowercased token per value, for case-insensitive exact
+///                     match (tags, authors, enums, ids)
+///  * `en_stem_keep` — `en_stem`, but each word is kept as its surface form and
+///                     its stem is added at the same position when it differs
 fn register_analyzers(index: &Index) {
     let lowercase = TextAnalyzer::builder(RawTokenizer::default())
         .filter(LowerCaser)
+        .build();
+    // tantivy's `en_stem` chain with the stemmer swapped for the keeping one, so
+    // a field migrated from `en_stem` sees identical tokens plus surface forms.
+    let en_stem_keep = TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter(RemoveLongFilter::limit(40))
+        .filter(LowerCaser)
+        .filter(keep_stem::KeepStemFilter::english())
         .build();
 
     // Register into BOTH the indexing/search tokenizer manager and the
@@ -293,6 +306,7 @@ fn register_analyzers(index: &Index) {
     // built-ins and fails at commit with `Tokenizer "<name>" not found`.
     for manager in [index.tokenizers(), index.fast_field_tokenizer()] {
         manager.register("lowercase", lowercase.clone());
+        manager.register("en_stem_keep", en_stem_keep.clone());
     }
 }
 
@@ -797,6 +811,48 @@ pub extern "C" fn tantivy_index_stats(
     })
 }
 
+/// Tokens the named analyzer makes of `text`, as a JSON array of
+/// `{ "text", "position", "offset_from", "offset_to" }`, in stream order.
+/// Reads the *index's* tokenizer manager, so analyzers registered by
+/// `register_analyzers` (`lowercase`, `en_stem_keep`) resolve as well as the
+/// built-ins.
+/// Offsets are byte offsets into `text`'s UTF-8.
+/// Returns a heap C string (free with `tantivy_string_free`), or null on error.
+#[no_mangle]
+pub extern "C" fn tantivy_index_analyze(
+    index: *mut CIndex,
+    tokenizer: *const c_char,
+    text: *const c_char,
+    out_error: *mut *mut c_char,
+) -> *mut c_char {
+    guard(out_error, ptr::null_mut(), || {
+        let idx = unsafe { index.as_ref() }.ok_or("index handle is null")?;
+        let name = unsafe { opt_str(tokenizer) }.ok_or("tokenizer name is null or not UTF-8")?;
+        let text = unsafe { opt_str(text) }.ok_or("text is null or not UTF-8")?;
+        let mut analyzer = idx
+            .index
+            .tokenizers()
+            .get(name)
+            .ok_or_else(|| format!("tokenizer \"{name}\" not found"))?;
+        let mut stream = analyzer.token_stream(text);
+        let mut tokens = Vec::new();
+        while stream.advance() {
+            let t = stream.token();
+            tokens.push(json!({
+                "text": t.text,
+                "position": t.position,
+                "offset_from": t.offset_from,
+                "offset_to": t.offset_to,
+            }));
+        }
+        let out = serde_json::to_string(&tokens)
+            .map_err(|e| format!("could not serialize tokens: {e}"))?;
+        CString::new(out)
+            .map(CString::into_raw)
+            .map_err(|_| "result contained interior NUL".to_string())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Searching
 // ---------------------------------------------------------------------------
@@ -946,6 +1002,8 @@ pub extern "C" fn tantivy_index_count(
 //   {"type":"more_like_this","fields":{F:[S,...]},"min_doc_frequency":N?,...}
 //   {"type":"phrase","field":F,"terms":[S,...],"slop":0}
 //   {"type":"phrase_prefix","field":F,"terms":[S,...],"max_expansions":N?}
+//   {"type":"multi_phrase","field":F,"positions":[{"offset":N,"terms":[S,...]},...],"slop":0}
+//                                   (any one term per position; see multi_phrase.rs)
 //   {"type":"range","field":F,"lower":{"value":V,"included":true}|null,"upper":...}
 //   {"type":"boost","query":NODE,"boost":2.0}
 //   {"type":"boolean","clauses":[{"occur":"must|should|must_not","query":NODE}],
@@ -1399,6 +1457,43 @@ fn build_query(
                     Ok(Box::new(pq))
                 }
             }
+        }
+        "multi_phrase" => {
+            let name = node
+                .get("field")
+                .and_then(|x| x.as_str())
+                .ok_or("multi_phrase missing 'field'")?;
+            let field = schema
+                .get_field(name)
+                .map_err(|_| format!("unknown field '{name}'"))?;
+            if !matches!(schema.get_field_entry(field).field_type(), FieldType::Str(_)) {
+                return Err(format!("multi_phrase on '{name}' requires a text field"));
+            }
+            let positions_json = node
+                .get("positions")
+                .and_then(|x| x.as_array())
+                .ok_or("multi_phrase requires a 'positions' array")?;
+            let mut positions = Vec::with_capacity(positions_json.len());
+            for p in positions_json {
+                let offset = p
+                    .get("offset")
+                    .and_then(|x| x.as_u64())
+                    .ok_or("multi_phrase position requires a non-negative integer 'offset'")?;
+                let terms = p
+                    .get("terms")
+                    .and_then(|x| x.as_array())
+                    .ok_or("multi_phrase position requires a 'terms' array")?
+                    .iter()
+                    .map(|t| {
+                        t.as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| "multi_phrase terms must be strings".to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                positions.push((offset as usize, terms));
+            }
+            let slop = node.get("slop").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            Ok(Box::new(multi_phrase::MultiPhraseQuery::new(field, positions, slop)?))
         }
         "phrase_prefix" => {
             let name = node

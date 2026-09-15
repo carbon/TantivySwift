@@ -1014,6 +1014,8 @@ name = "tantivy_ffi"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "regex-syntax",
+ "rust-stemmers",
  "serde_json",
  "tantivy",
  "time",

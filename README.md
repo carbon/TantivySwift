@@ -117,10 +117,25 @@ what the native layer registers (a drift-guard test enforces this):
 | `.raw` | the whole value as one token, **case-sensitive** (exact match) |
 | `.lowercase` | the whole value as one **lowercased** token (case-insensitive exact match: tags, authors, enums, ids) |
 | `.whitespace` | split on whitespace only |
+| `.englishKeepingSurface` | `.english`, but each word is also kept as written: `designer` → `designer` + `design` at one position (tantivy-style `en_stem_keep`) |
 
 ```swift
 .addTextField("title", stored: true, tokenizer: .english)
 ```
+
+`index.analyze(_:with:)` runs an analyzer without a query and returns its
+`Token`s (text, position, byte offsets) — use it to build typed term and phrase
+queries for analyzed fields:
+
+```swift
+let terms = try index.analyze("Graphic Designers", with: .englishKeepingSurface)
+// graphic@0, designers@1, design@1
+```
+
+Query a `.englishKeepingSurface` field with typed queries built this way, not
+`.parsed` or a query string: the parser requires *both* same-position tokens,
+so `designers` only matches the exact word `designers` — parsing silently loses
+the stemming. `.multiPhrase(field, tokens:)` below is the phrase form.
 
 `indexing` controls postings detail; `.position` (the default) is required for
 phrase queries.
@@ -340,6 +355,23 @@ term is given.
 
 > Like `term`, these match **indexed tokens**: pass an already-analyzed prefix
 > (e.g. lowercase for the `default` tokenizer).
+
+#### Phrases with alternatives
+
+`.multiPhrase` is a phrase where each position accepts any one of several terms
+(Lucene's `MultiPhraseQuery`) — synonyms, or a word's surface form and stem:
+
+```swift
+try index.search(.multiPhrase("title", [["graphic"], ["designer", "illustrator"]]))
+
+// Straight from the analyzer: tokens sharing a position become alternatives.
+let tokens = try index.analyze("graphic designers", with: .englishKeepingSurface)
+try index.search(.multiPhrase("title", tokens: tokens))   // "graphic design", "graphic designer", …
+```
+
+It scores like `.phrase`, each position weighted as its most frequent
+alternative, so adding a synonym never raises a score. `slop` and position gaps
+(`PhrasePosition(offset:terms:)`) work as for `.phrase`.
 
 #### Wildcard, exists & more-like-this
 

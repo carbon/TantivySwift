@@ -33,6 +33,8 @@ struct QueryEncodingTests {
                 boostFactor: 1.5, stopWords: ["the", "a"])),
             .phrase("body", ["old", "man"], slop: 2),
             .phrasePrefix("body", ["old", "ma"], maxExpansions: 10),
+            .multiPhrase("body", [["old"], ["man", "men"]], slop: 1),
+            .multiPhrase(field: "body", positions: [], slop: 0),
             .range("year", 1900...2000),
             .range(field: "year", lower: .excluded(.int(1900)), upper: nil),
             .term("t", "x").boosted(by: 2.5),

@@ -64,4 +64,56 @@ struct TokenizerTests {
         #expect(try index.search("f:\"New York\"").count == 1)  // whole token
         #expect(try index.search("f:York").count == 0)          // not split on space
     }
+
+    // MARK: - en_stem_keep
+
+    private func analyzeKeeping(_ text: String) throws -> [Token] {
+        let index = try Index.inMemory(schema: SchemaBuilder().addTextField("f").build())
+        return try index.analyze(text, with: .englishKeepingSurface)
+    }
+
+    @Test func keepingSurfaceAddsStemAtSamePosition() throws {
+        let tokens = try analyzeKeeping("designer")
+        #expect(tokens.map(\.text) == ["designer", "design"])
+        #expect(tokens.map(\.position) == [0, 0])
+        #expect(tokens.map(\.offsetFrom) == [0, 0])
+        #expect(tokens.map(\.offsetTo) == [8, 8])
+    }
+
+    /// A word that stems to itself is stored once, not twice.
+    @Test func keepingSurfaceDedupesUnchangedWords() throws {
+        #expect(try analyzeKeeping("poster").map(\.text) == ["poster"])
+    }
+
+    /// The surface and stem share a position and the next word is not pushed
+    /// along — the invariant phrase queries depend on.
+    @Test func keepingSurfaceLeavesLaterPositionsAlone() throws {
+        let tokens = try analyzeKeeping("graphic designers")
+        #expect(tokens.map(\.text) == ["graphic", "designers", "design"])
+        #expect(tokens.map(\.position) == [0, 1, 1])
+    }
+
+    /// One field answers everything an unstemmed mirror field would, plus the
+    /// stemmed forms — the "mirror is a subset" claim, executable.
+    @Test func keepingSurfaceFieldAnswersExactStemmedPhraseAndPrefix() throws {
+        let index = try singleDoc(
+            fieldType: { $0.addTextField($1, stored: true, tokenizer: .englishKeepingSurface) },
+            value: "graphic designers")
+        #expect(try index.count(.term("f", "designers")) == 1)
+        #expect(try index.count(.term("f", "design")) == 1)
+        #expect(try index.count(.phrase("f", ["graphic", "designers"])) == 1)
+        #expect(try index.count(.phrase("f", ["graphic", "design"])) == 1)
+        #expect(try index.count(.regex("f", "desi.*")) == 1)
+    }
+
+    /// Not a recommendation: the parser turns `designers` + `design` (one
+    /// position) into a phrase with duplicate offsets. It still matches; this
+    /// pins that rather than leaving it to be discovered.
+    @Test func keepingSurfaceFieldThroughQueryParserStillMatches() throws {
+        let index = try singleDoc(
+            fieldType: { $0.addTextField($1, stored: true, tokenizer: .englishKeepingSurface) },
+            value: "graphic designers")
+        #expect(try index.search(.parsed("designers", fields: ["f"])).count == 1)
+        #expect(try index.search("f:designers").count == 1)
+    }
 }

@@ -25,9 +25,26 @@ public enum Query: Sendable {
     case moreLikeThis(fields: [String: [String]], options: MoreLikeThisOptions)
     case phrase(field: String, terms: [String], slop: UInt32)
     case phrasePrefix(field: String, terms: [String], maxExpansions: UInt32)
+    case multiPhrase(field: String, positions: [PhrasePosition], slop: UInt32)
     case range(field: String, lower: RangeBound?, upper: RangeBound?)
     indirect case boost(Query, Float)
     indirect case boolean(must: [Query], should: [Query], mustNot: [Query], minimumShouldMatch: Int?)
+}
+
+/// One position of a ``Query/multiPhrase(field:positions:slop:)``: any one of
+/// ``terms`` at ``offset`` satisfies it.
+public struct PhrasePosition: Sendable, Equatable {
+    /// Where this position sits relative to the others. Gaps are kept: offsets
+    /// 0 and 2 need exactly one word between. Positions sharing an offset are
+    /// merged into one set of alternatives.
+    public var offset: Int
+    /// The alternatives, as indexed tokens.
+    public var terms: [String]
+
+    public init(offset: Int, terms: [String]) {
+        self.offset = offset
+        self.terms = terms
+    }
 }
 
 /// Tuning knobs for ``Query/moreLikeThis(_:options:)`` (tantivy's MoreLikeThis,
@@ -143,6 +160,32 @@ extension Query {
     /// the prefix may expand to.
     public static func phrasePrefix(_ field: String, _ terms: [String], maxExpansions: UInt32 = 50) -> Query {
         .phrasePrefix(field: field, terms: terms, maxExpansions: maxExpansions)
+    }
+
+    /// A phrase with alternatives at each position — Lucene's
+    /// `MultiPhraseQuery`. `[["graphic"], ["designers", "design"]]` matches
+    /// "graphic designers" and "graphic design": each inner array is one word
+    /// position, and any one of its terms satisfies it. Terms match indexed
+    /// tokens, and the field needs positions when more than one is given.
+    ///
+    /// Scores like ``phrase(_:_:slop:)``, with each position weighted as its
+    /// most frequent alternative — adding a synonym never raises a score.
+    public static func multiPhrase(_ field: String, _ positions: [[String]], slop: UInt32 = 0) -> Query {
+        .multiPhrase(
+            field: field,
+            positions: positions.enumerated().map { PhrasePosition(offset: $0.offset, terms: $0.element) },
+            slop: slop)
+    }
+
+    /// A multi-phrase straight from ``Index/analyze(_:with:)``: tokens sharing a
+    /// position become alternatives, and position gaps are kept. On a
+    /// ``Analyzer/englishKeepingSurface`` field, analyzing with that analyzer
+    /// and passing the tokens here matches every inflection of the phrase.
+    public static func multiPhrase(_ field: String, tokens: [Token], slop: UInt32 = 0) -> Query {
+        let byPosition = Dictionary(grouping: tokens, by: \.position)
+            .sorted { $0.key < $1.key }
+            .map { PhrasePosition(offset: $0.key, terms: $0.value.map(\.text)) }
+        return .multiPhrase(field: field, positions: byPosition, slop: slop)
     }
 
     public static func fuzzy(
@@ -409,6 +452,22 @@ extension Query {
             out.write(Int(maxExpansions))
             out.raw("}")
 
+        case .multiPhrase(let field, let positions, let slop):
+            out.raw(#"{"type":"multi_phrase","field":"#)
+            out.write(field)
+            out.raw(#","positions":["#)
+            for (i, position) in positions.enumerated() {
+                if i > 0 { out.raw(",") }
+                out.raw(#"{"offset":"#)
+                out.write(position.offset)
+                out.raw(#","terms":"#)
+                out.write(position.terms)
+                out.raw("}")
+            }
+            out.raw(#"],"slop":"#)
+            out.write(Int(slop))
+            out.raw("}")
+
         case .range(let field, let lower, let upper):
             out.raw(#"{"type":"range","field":"#)
             out.write(field)
@@ -460,6 +519,7 @@ extension Query {
     ///    bound term, so a fully unbounded range panics inside the engine.
     ///  * a negative `minimumShouldMatch` — the FFI layer would reject it; a
     ///    minimum can't be satisfied by "fewer than zero" clauses.
+    ///  * a negative multi-phrase offset — positions count from zero.
     private func validate() throws(TantivyError) {
         func finite(_ v: TermValue) -> Bool {
             if case .double(let d) = v { return d.isFinite }
@@ -471,6 +531,10 @@ extension Query {
         case .moreLikeThis(_, let options):
             if let b = options.boostFactor, !b.isFinite {
                 throw .encoding("non-finite more_like_this boost factor")
+            }
+        case .multiPhrase(let field, let positions, _):
+            if let bad = positions.first(where: { $0.offset < 0 }) {
+                throw .encoding("multi-phrase on '\(field)' has a negative offset (\(bad.offset))")
             }
         case .term(_, let value):
             if !finite(value) { throw .encoding("non-finite number in term query") }
