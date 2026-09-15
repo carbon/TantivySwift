@@ -20,6 +20,14 @@ base64 = "0.22"
 # formatting so the MessagePack envelope renders dates identically to the JSON
 # one (which gets it from tantivy's own serde impl).
 time = { version = "0.3", features = ["parsing", "formatting"] }
+# The stemmer behind `en_stem_keep` (see keep_stem.rs). tantivy's own `Stemmer`
+# filter replaces the token, so the keeping filter drives the algorithm itself.
+# Pinned to tantivy's exact copy so `en_stem_keep` and `en_stem` stem alike.
+rust-stemmers = "=1.2.0"
+# Escapes `multi_phrase` alternatives into literal regex alternations. Pinned to
+# the exact parser tantivy-fst compiles those patterns with, so what `escape`
+# emits is what the automaton reads.
+regex-syntax = "=0.8.10"
 
 [profile.release]
 opt-level = 3

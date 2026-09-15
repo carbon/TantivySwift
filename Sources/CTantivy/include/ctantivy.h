@@ -143,6 +143,18 @@ int tantivy_writer_garbage_collect(CWriter *writer, char **out_error);
  */
 char *tantivy_index_stats(CIndex *index, char **out_error);
 
+/*
+ * Run the index's analyzer named `tokenizer` (built-in or registered by this
+ * library) over `text`, as a JSON array in stream order:
+ *   [{"text":"design","position":0,"offset_from":0,"offset_to":8},...]
+ * Offsets are byte offsets into `text`. Returns a heap string (free with
+ * tantivy_string_free), or NULL on error (e.g. an unknown tokenizer).
+ */
+char *tantivy_index_analyze(CIndex *index,
+                            const char *tokenizer,
+                            const char *text,
+                            char **out_error);
+
 /* ---- searching ---- */
 
 /*

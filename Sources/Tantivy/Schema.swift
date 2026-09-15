@@ -37,6 +37,23 @@ public enum Analyzer: String, Sendable, CaseIterable {
     /// match for tags, authors, enums, ids. (Formerly named `tag`; the `tag`
     /// tokenizer remains registered natively so older indexes still open.)
     case lowercase = "lowercase"
+    /// ``english``, but keeping each word's surface form: every word is indexed
+    /// as itself, and its stem is added **at the same position** when it
+    /// differs (`designer` → `designer` + `design`; `poster` → `poster`). One
+    /// field then answers exact, stemmed, prefix and phrase queries.
+    ///
+    /// Query a field on this analyzer with typed queries built from
+    /// ``Index/analyze(_:with:)`` (``Query/term(_:_:)-1w6xh``, ``Query/phrase(_:_:slop:)``,
+    /// ``Query/multiPhrase(_:tokens:slop:)``) — never ``Query/parsed(_:fields:)``
+    /// or a query string. The query parser analyzes the query with this same
+    /// analyzer and requires *both* same-position tokens, so `designers` only
+    /// matches documents containing the exact word `designers`: parsing
+    /// silently loses the stemming the field was chosen for.
+    ///
+    /// Every word contributes two tokens to the field's length where its stem
+    /// differs, and a `fast` field's column holds both — so BM25 sees such
+    /// text as slightly longer, and a terms aggregation counts both forms.
+    case englishKeepingSurface = "en_stem_keep"
 }
 
 /// Fluent builder for an index `Schema`.
