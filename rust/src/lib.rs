@@ -1306,9 +1306,12 @@ fn build_query(
         }
         "term" => {
             let (field, value) = field_and_value(schema, node)?;
+            // `WithFreqs`, as tantivy's `QueryParser` builds its term leaves:
+            // `Basic` skips term frequencies, so BM25 would count every match
+            // once. Fields indexed without freqs downgrade to `Basic` anyway.
             Ok(Box::new(TermQuery::new(
                 term_for(schema, field, value)?,
-                IndexRecordOption::Basic,
+                IndexRecordOption::WithFreqs,
             )))
         }
         "fuzzy" => {
