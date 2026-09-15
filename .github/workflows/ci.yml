@@ -14,19 +14,19 @@ concurrency:
 jobs:
   test:
     name: Build & test (host mode)
-    runs-on: macos-15
+    # Package.swift requires Swift 6.4, which ships with Xcode 27. GitHub's
+    # macos-26 image only carries Xcode 26.x; Xcode 27 lives on its own
+    # (preview) image, selected with the `xcode-27` label. That image ships a
+    # single Xcode, already the default at /Applications/Xcode.app, so no
+    # setup-xcode step is needed. Once Xcode 27 lands on the regular macos-26
+    # image this can move back to `macos-26` plus a setup-xcode step.
+    # See https://github.com/actions/runner-images/issues/14404
+    runs-on: xcode-27
 
     steps:
       # No LFS checkout on purpose: CI builds the Rust engine from source and
       # links that (host mode), so the committed ~87 MB xcframework isn't needed.
       - uses: actions/checkout@v4
-
-      # Package.swift requires Swift 6.2, which ships with Xcode 26+. Bump this
-      # if the runner image's available Xcode versions change.
-      - name: Select Xcode (Swift 6.2+)
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: '26'
 
       - name: Show toolchain
         run: |

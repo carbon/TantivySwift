@@ -12,7 +12,7 @@ import CTantivy
 private struct AggregationKey: Decodable {
     let value: FieldValue
 
-    init(from decoder: Decoder) throws {
+    init(from decoder: any Decoder) throws {
         let c = try decoder.singleValueContainer()
         if let b = try? c.decode(Bool.self) { value = .bool(b); return }
         if let i = try? c.decode(Int64.self) { value = .int(i); return }

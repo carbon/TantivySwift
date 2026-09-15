@@ -1,4 +1,4 @@
-import Foundation
+public import Foundation
 
 /// A structured query that mirrors tantivy's own `Query` types. This is the
 /// second search API: instead of a query *string* parsed by tantivy, you build a
@@ -422,7 +422,7 @@ extension Query {
                 out.write(fields[name]!)
             }
             out.raw("}")
-            optional("min_doc_frequency", options.minDocFrequency) { $0 == nil ? () : $1.write($0) }
+            optional("min_doc_frequency", options.minDocFrequency) { $1.write($0) }
             optional("max_doc_frequency", options.maxDocFrequency) { $1.write($0) }
             optional("min_term_frequency", options.minTermFrequency) { $1.write($0) }
             optional("max_query_terms", options.maxQueryTerms) { $1.write($0) }

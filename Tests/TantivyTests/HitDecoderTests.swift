@@ -165,13 +165,13 @@ struct HitDecoderTests {
     @Test func dateAndDataDecodeThroughASingleValueContainer() throws {
         struct BoxedDate: Decodable {
             let value: Date
-            init(from decoder: Decoder) throws {
+            init(from decoder: any Decoder) throws {
                 value = try decoder.singleValueContainer().decode(Date.self)
             }
         }
         struct BoxedData: Decodable {
             let value: Data
-            init(from decoder: Decoder) throws {
+            init(from decoder: any Decoder) throws {
                 value = try decoder.singleValueContainer().decode(Data.self)
             }
         }

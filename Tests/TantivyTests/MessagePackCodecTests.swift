@@ -242,7 +242,7 @@ struct MessagePackCodecTests {
     @Test func aWrongTypeThrows() throws {
         var writer = MessagePackWriter()
         writer.write("not a number")
-        try writer.bytes.withUnsafeBufferPointer { buffer in
+        writer.bytes.withUnsafeBufferPointer { buffer in
             let raw = UnsafeRawBufferPointer(buffer)
             #expect(throws: (any Error).self) {
                 var r = MessagePackReader(raw); return try r.readDouble()

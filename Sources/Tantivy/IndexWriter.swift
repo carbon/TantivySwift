@@ -1,4 +1,4 @@
-import Foundation
+public import Foundation
 import CTantivy
 
 /// Adds and removes documents in an `Index`. Create one with `Index.writer()`.

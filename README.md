@@ -38,7 +38,7 @@ for hit in try index.search("sea whale", limit: 10) {
 
 ## Requirements
 
-- Swift 6.2 toolchain (the package is `swift-tools-version: 6.2`, Swift 6 language mode)
+- Swift 6.4 toolchain / Xcode 27 (the package is `swift-tools-version: 6.4`, Swift 6 language mode)
 - macOS 15+ / iOS 18+ (iPadOS uses the iOS slices; Mac Catalyst 18+)
 
 ## Installation (Swift Package Manager)

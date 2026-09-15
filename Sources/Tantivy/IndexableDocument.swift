@@ -1,4 +1,4 @@
-import Foundation
+public import Foundation
 
 /// A `Codable` model that carries its own index schema, so a `SearchCollection`
 /// can be created without restating the schema at the call site.

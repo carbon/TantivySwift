@@ -1,4 +1,4 @@
-import Foundation
+public import Foundation
 import CTantivy
 
 /// A full-text search index backed by tantivy 0.26.1.

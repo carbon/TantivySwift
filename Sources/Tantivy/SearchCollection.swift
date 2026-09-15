@@ -1,4 +1,4 @@
-import Foundation
+public import Foundation
 
 /// A typed, store-like façade over an `Index` for a single `Codable` model.
 ///
@@ -18,7 +18,7 @@ import Foundation
 /// ```
 ///
 /// Safe to share for concurrent reads (it forwards to the underlying `Index`).
-public final class SearchCollection<Model: Codable>: @unchecked Sendable {
+public final class SearchCollection<Model: Codable>: Sendable {
 
     /// The underlying index, exposed for advanced use (custom queries, etc.).
     public let index: Index
