@@ -1,4 +1,4 @@
-import Foundation
+public import Foundation
 
 /// A stored field value returned in a search hit.
 ///

@@ -1,4 +1,4 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.4
 import PackageDescription
 import Foundation
 
@@ -53,6 +53,16 @@ if fm.fileExists(atPath: packageRoot.appendingPathComponent(xcframeworkPath).pat
     cTarget = .binaryTarget(name: "CTantivy", url: remoteXCFramework, checksum: checksum)
 }
 
+// Swift 7 upcoming features, adopted early. Imports must state their access
+// level, which keeps the CTantivy C module out of the public interface.
+let swiftSettings: [SwiftSetting] = [
+    .enableUpcomingFeature("ExistentialAny"),
+    .enableUpcomingFeature("InternalImportsByDefault"),
+    .enableUpcomingFeature("MemberImportVisibility"),
+    .enableUpcomingFeature("InferIsolatedConformances"),
+    .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+]
+
 let package = Package(
     name: "Tantivy",
     platforms: [
@@ -67,6 +77,7 @@ let package = Package(
         .target(
             name: "Tantivy",
             dependencies: ["CTantivy"],
+            swiftSettings: swiftSettings,
             // tantivy's static lib needs libiconv on Apple platforms
             // (-lSystem / -lc / -lm are linked implicitly).
             linkerSettings: [
@@ -75,7 +86,8 @@ let package = Package(
         ),
         .testTarget(
             name: "TantivyTests",
-            dependencies: ["Tantivy"]
+            dependencies: ["Tantivy"],
+            swiftSettings: swiftSettings
         ),
     ]
 )

@@ -24,23 +24,23 @@ private enum DateParsing {
 /// Conversions from a `FieldValue` to a concrete Swift scalar, raising a
 /// `DecodingError` on a type/range mismatch.
 private enum Convert {
-    static func string(_ v: FieldValue, _ path: [CodingKey]) throws -> String {
+    static func string(_ v: FieldValue, _ path: [any CodingKey]) throws -> String {
         if case .string(let s) = v { return s }
         throw mismatch(String.self, v, path)
     }
-    static func bool(_ v: FieldValue, _ path: [CodingKey]) throws -> Bool {
+    static func bool(_ v: FieldValue, _ path: [any CodingKey]) throws -> Bool {
         if case .bool(let b) = v { return b }
         throw mismatch(Bool.self, v, path)
     }
-    static func date(_ v: FieldValue, _ path: [CodingKey]) throws -> Date {
+    static func date(_ v: FieldValue, _ path: [any CodingKey]) throws -> Date {
         if case .string(let s) = v, let d = DateParsing.date(from: s) { return d }
         throw mismatch(Date.self, v, path)
     }
-    static func data(_ v: FieldValue, _ path: [CodingKey]) throws -> Data {
+    static func data(_ v: FieldValue, _ path: [any CodingKey]) throws -> Data {
         if case .bytes(let d) = v { return d }
         throw mismatch(Data.self, v, path)
     }
-    static func double(_ v: FieldValue, _ path: [CodingKey]) throws -> Double {
+    static func double(_ v: FieldValue, _ path: [any CodingKey]) throws -> Double {
         switch v {
         case .double(let d): return d
         case .int(let i): return Double(i)
@@ -52,13 +52,13 @@ private enum Convert {
     /// `Float(1e300)` is `+infinity`, so without this check an out-of-range
     /// value decodes as an infinity instead of throwing — unlike every integer
     /// conversion here, which range-checks via `exactly:`.
-    static func float(_ v: FieldValue, _ path: [CodingKey]) throws -> Float {
+    static func float(_ v: FieldValue, _ path: [any CodingKey]) throws -> Float {
         let d = try double(v, path)
         let f = Float(d)
         guard f.isFinite || !d.isFinite else { throw mismatch(Float.self, v, path) }
         return f
     }
-    static func int64(_ v: FieldValue, _ path: [CodingKey]) throws -> Int64 {
+    static func int64(_ v: FieldValue, _ path: [any CodingKey]) throws -> Int64 {
         switch v {
         case .int(let i): return i
         case .unsigned(let u): if let i = Int64(exactly: u) { return i }
@@ -67,7 +67,7 @@ private enum Convert {
         }
         throw mismatch(Int64.self, v, path)
     }
-    static func uint64(_ v: FieldValue, _ path: [CodingKey]) throws -> UInt64 {
+    static func uint64(_ v: FieldValue, _ path: [any CodingKey]) throws -> UInt64 {
         switch v {
         case .unsigned(let u): return u
         case .int(let i): if let u = UInt64(exactly: i) { return u }
@@ -76,15 +76,15 @@ private enum Convert {
         }
         throw mismatch(UInt64.self, v, path)
     }
-    static func signed<T: FixedWidthInteger & SignedInteger>(_ v: FieldValue, _ path: [CodingKey]) throws -> T {
+    static func signed<T: FixedWidthInteger & SignedInteger>(_ v: FieldValue, _ path: [any CodingKey]) throws -> T {
         guard let r = T(exactly: try int64(v, path)) else { throw mismatch(T.self, v, path) }
         return r
     }
-    static func unsigned<T: FixedWidthInteger & UnsignedInteger>(_ v: FieldValue, _ path: [CodingKey]) throws -> T {
+    static func unsigned<T: FixedWidthInteger & UnsignedInteger>(_ v: FieldValue, _ path: [any CodingKey]) throws -> T {
         guard let r = T(exactly: try uint64(v, path)) else { throw mismatch(T.self, v, path) }
         return r
     }
-    static func mismatch(_ t: Any.Type, _ v: FieldValue, _ path: [CodingKey]) -> DecodingError {
+    static func mismatch(_ t: Any.Type, _ v: FieldValue, _ path: [any CodingKey]) -> DecodingError {
         DecodingError.typeMismatch(t, .init(
             codingPath: path, debugDescription: "cannot decode \(t) from field value \(v)"))
     }
@@ -105,17 +105,17 @@ extension SearchHit {
 
 private struct FieldsDecoder: Decoder {
     let fields: [String: [FieldValue]]
-    let codingPath: [CodingKey]
+    let codingPath: [any CodingKey]
     var userInfo: [CodingUserInfoKey: Any] { [:] }
 
     func container<Key: CodingKey>(keyedBy type: Key.Type) -> KeyedDecodingContainer<Key> {
         KeyedDecodingContainer(FieldsKeyed(fields: fields, codingPath: codingPath))
     }
-    func unkeyedContainer() throws -> UnkeyedDecodingContainer {
+    func unkeyedContainer() throws -> any UnkeyedDecodingContainer {
         throw DecodingError.typeMismatch([Any].self, .init(
             codingPath: codingPath, debugDescription: "a search hit decodes as an object, not an array"))
     }
-    func singleValueContainer() throws -> SingleValueDecodingContainer {
+    func singleValueContainer() throws -> any SingleValueDecodingContainer {
         throw DecodingError.typeMismatch(Any.self, .init(
             codingPath: codingPath, debugDescription: "a search hit decodes as an object"))
     }
@@ -123,11 +123,11 @@ private struct FieldsDecoder: Decoder {
 
 private struct FieldsKeyed<Key: CodingKey>: KeyedDecodingContainerProtocol {
     let fields: [String: [FieldValue]]
-    let codingPath: [CodingKey]
+    let codingPath: [any CodingKey]
     var allKeys: [Key] { fields.keys.compactMap(Key.init(stringValue:)) }
 
     private func values(_ key: Key) -> [FieldValue] { fields[key.stringValue] ?? [] }
-    private func path(_ key: Key) -> [CodingKey] { codingPath + [key] }
+    private func path(_ key: Key) -> [any CodingKey] { codingPath + [key] }
     private func first(_ key: Key) throws -> FieldValue {
         guard let v = values(key).first else {
             throw DecodingError.keyNotFound(key, .init(
@@ -167,11 +167,11 @@ private struct FieldsKeyed<Key: CodingKey>: KeyedDecodingContainerProtocol {
         throw DecodingError.typeMismatch([String: Any].self, .init(
             codingPath: path(key), debugDescription: "tantivy fields are not nested objects"))
     }
-    func nestedUnkeyedContainer(forKey key: Key) throws -> UnkeyedDecodingContainer {
+    func nestedUnkeyedContainer(forKey key: Key) throws -> any UnkeyedDecodingContainer {
         FieldUnkeyed(values: values(key), codingPath: path(key))
     }
-    func superDecoder() throws -> Decoder { FieldsDecoder(fields: fields, codingPath: codingPath) }
-    func superDecoder(forKey key: Key) throws -> Decoder {
+    func superDecoder() throws -> any Decoder { FieldsDecoder(fields: fields, codingPath: codingPath) }
+    func superDecoder(forKey key: Key) throws -> any Decoder {
         FieldDecoder(values: values(key), codingPath: path(key))
     }
 }
@@ -180,24 +180,24 @@ private struct FieldsKeyed<Key: CodingKey>: KeyedDecodingContainerProtocol {
 
 private struct FieldDecoder: Decoder {
     let values: [FieldValue]
-    let codingPath: [CodingKey]
+    let codingPath: [any CodingKey]
     var userInfo: [CodingUserInfoKey: Any] { [:] }
 
     func container<Key: CodingKey>(keyedBy type: Key.Type) throws -> KeyedDecodingContainer<Key> {
         throw DecodingError.typeMismatch([String: Any].self, .init(
             codingPath: codingPath, debugDescription: "a field value is not a nested object"))
     }
-    func unkeyedContainer() throws -> UnkeyedDecodingContainer {
+    func unkeyedContainer() throws -> any UnkeyedDecodingContainer {
         FieldUnkeyed(values: values, codingPath: codingPath)
     }
-    func singleValueContainer() throws -> SingleValueDecodingContainer {
+    func singleValueContainer() throws -> any SingleValueDecodingContainer {
         FieldSingle(value: values.first, codingPath: codingPath)
     }
 }
 
 private struct FieldUnkeyed: UnkeyedDecodingContainer {
     let values: [FieldValue]
-    let codingPath: [CodingKey]
+    let codingPath: [any CodingKey]
     var count: Int? { values.count }
     var isAtEnd: Bool { currentIndex >= values.count }
     private(set) var currentIndex: Int = 0
@@ -238,18 +238,18 @@ private struct FieldUnkeyed: UnkeyedDecodingContainer {
         throw DecodingError.typeMismatch([String: Any].self, .init(
             codingPath: codingPath, debugDescription: "field values are not nested objects"))
     }
-    mutating func nestedUnkeyedContainer() throws -> UnkeyedDecodingContainer {
+    mutating func nestedUnkeyedContainer() throws -> any UnkeyedDecodingContainer {
         throw DecodingError.typeMismatch([Any].self, .init(
             codingPath: codingPath, debugDescription: "field values are not nested arrays"))
     }
-    mutating func superDecoder() throws -> Decoder {
+    mutating func superDecoder() throws -> any Decoder {
         FieldDecoder(values: values, codingPath: codingPath)
     }
 }
 
 private struct FieldSingle: SingleValueDecodingContainer {
     let value: FieldValue?
-    let codingPath: [CodingKey]
+    let codingPath: [any CodingKey]
 
     private func req() throws -> FieldValue {
         guard let v = value else {

@@ -1,4 +1,4 @@
-import Foundation
+public import Foundation
 
 /// A typed value in a `Document`. Unlike the `[String: Any]` add path (which
 /// `JSONSerialization` rejects `Date` in), this carries `Date` and converts it

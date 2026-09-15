@@ -25,3 +25,10 @@ time = { version = "0.3", features = ["parsing", "formatting"] }
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# Cargo strips build scripts and proc-macros in release by default, and on
+# macOS 27 dyld refuses to load the stripped proc-macro dylibs ("mis-aligned
+# LINKEDIT string pool"), failing the build with "can't find crate". They only
+# run at build time, so leaving them unstripped costs nothing in the output.
+[profile.release.build-override]
+strip = false

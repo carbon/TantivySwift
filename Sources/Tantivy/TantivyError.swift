@@ -1,4 +1,4 @@
-import Foundation
+public import Foundation
 
 /// Errors surfaced by the Swift wrapper around the tantivy C library.
 public enum TantivyError: Error, Sendable, CustomStringConvertible {
