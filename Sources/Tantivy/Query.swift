@@ -311,10 +311,45 @@ extension Query {
     }
 }
 
-/// `a && b` — both must match.
-public func && (lhs: Query, rhs: Query) -> Query { .allOf([lhs, rhs]) }
-/// `a || b` — either may match.
-public func || (lhs: Query, rhs: Query) -> Query { .anyOf([lhs, rhs]) }
+/// `a && b` — both must match. Chains flatten: `a && b && c` is one
+/// `must` list of three, not a boolean nested in a boolean.
+public func && (lhs: Query, rhs: Query) -> Query {
+    .allOf(lhs.pureMustClauses + rhs.pureMustClauses)
+}
+/// `a || b` — either may match. Chains flatten: `a || b || c` is one
+/// `should` list of three.
+public func || (lhs: Query, rhs: Query) -> Query {
+    .anyOf(lhs.pureShouldClauses + rhs.pureShouldClauses)
+}
+
+extension Query {
+    /// This query's clauses if it is a boolean of nothing but `must` clauses,
+    /// else the query itself as a single clause.
+    ///
+    /// Merging is exact: BM25 sums a boolean's clause scores, so a `must` list
+    /// nested inside a `must` list scores the same as one flat list. Each
+    /// nesting level costs the engine three levels of JSON recursion, so
+    /// without this a chain of a few dozen `&&` exceeded its limit; flat, the
+    /// chain can be any length.
+    fileprivate var pureMustClauses: [Query] {
+        if case .boolean(let must, let should, let mustNot, let minimum) = self,
+           should.isEmpty, mustNot.isEmpty, minimum == nil {
+            return must
+        }
+        return [self]
+    }
+
+    /// The `should` counterpart of ``pureMustClauses``. A boolean with a
+    /// `minimumShouldMatch` is left intact: its minimum applies to *its*
+    /// clauses, and merging would change what it counts.
+    fileprivate var pureShouldClauses: [Query] {
+        if case .boolean(let must, let should, let mustNot, let minimum) = self,
+           must.isEmpty, mustNot.isEmpty, minimum == nil {
+            return should
+        }
+        return [self]
+    }
+}
 
 // MARK: - JSON serialization (wire format for the FFI)
 
@@ -520,7 +555,13 @@ extension Query {
     ///  * a negative `minimumShouldMatch` — the FFI layer would reject it; a
     ///    minimum can't be satisfied by "fewer than zero" clauses.
     ///  * a negative multi-phrase offset — positions count from zero.
-    private func validate() throws(TantivyError) {
+    ///  * a tree nested deeper than ``maxNesting`` — serialization, the engine's
+    ///    JSON parser and query building all recurse per level, so a runaway
+    ///    tree is reported here instead of overflowing a stack.
+    private func validate(depth: Int = 0) throws(TantivyError) {
+        if depth > Query.maxNesting {
+            throw .encoding("query nests more than \(Query.maxNesting) levels deep")
+        }
         func finite(_ v: TermValue) -> Bool {
             if case .double(let d) = v { return d.isFinite }
             return true
@@ -546,16 +587,22 @@ extension Query {
             if let u = upper, !finite(u.value) { throw .encoding("non-finite number in range bound") }
         case .boost(let query, let factor):
             if !factor.isFinite { throw .encoding("non-finite boost factor") }
-            try query.validate()
+            try query.validate(depth: depth + 1)
         case .boolean(let must, let should, let mustNot, let minimum):
             if let minimum, minimum < 0 {
                 throw .encoding("minimumShouldMatch must be non-negative (got \(minimum))")
             }
-            for q in must { try q.validate() }
-            for q in should { try q.validate() }
-            for q in mustNot { try q.validate() }
+            for q in must { try q.validate(depth: depth + 1) }
+            for q in should { try q.validate(depth: depth + 1) }
+            for q in mustNot { try q.validate(depth: depth + 1) }
         }
     }
+
+    /// Deepest `boost`/`boolean` nesting a query may have. The engine's JSON
+    /// parser stops at 128 levels and a boolean clause costs three of those, so
+    /// this is already the effective ceiling; checking it here gives a clear
+    /// error and keeps the Swift-side recursion bounded.
+    static let maxNesting = 40
 
     /// The JSON tree handed to the FFI. Validates first, then serializes —
     /// never silently degrades to a match-all query.

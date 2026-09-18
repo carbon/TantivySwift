@@ -174,4 +174,123 @@ struct ValidationTests {
         let error = #expect(throws: TantivyError.self) { try index.termCounts("title", limit: -1) }
         #expect(error?.isEncoding == true)
     }
+
+    // MARK: - Recursion depth
+
+    private func nested(_ depth: Int) -> String {
+        String(repeating: "(", count: depth) + "dune" + String(repeating: ")", count: depth)
+    }
+
+    /// tantivy's query grammar recurses per group with no limit, so a deeply
+    /// nested query string used to overflow the stack — a process crash the
+    /// FFI panic guard cannot catch — and its backtracking doubles parse time
+    /// per level on the way there. It is now rejected before parsing, on the
+    /// string search, count, and `.parsed` paths alike.
+    @Test func deeplyNestedQueryStringThrows() throws {
+        let index = try corpus()
+        #expect(try index.search(nested(12)).count == 1)
+        #expect(try index.count(nested(12)) == 1)
+        #expect(try index.search(.parsed(nested(12))).count == 1)
+
+        for depth in [13, 100_000] {
+            let error = #expect(throws: TantivyError.self) { try index.search(nested(depth)) }
+            #expect(error?.message.contains("levels deep") == true)
+            #expect(throws: TantivyError.self) { try index.count(nested(depth)) }
+            #expect(throws: TantivyError.self) { try index.search(.parsed(nested(depth))) }
+        }
+    }
+
+    /// A backslash-escaped paren is a literal, not a group.
+    @Test func escapedParensDoNotCountAsNesting() throws {
+        let index = try corpus()
+        let escaped = String(repeating: "\\(", count: 100) + "dune"
+        _ = try index.search(escaped)   // parses (matching nothing is fine)
+    }
+
+    /// The structured tree recurses too; a runaway `boost`/`boolean` nesting is
+    /// reported as an encoding error at the depth the engine already refuses.
+    /// (Releasing an `indirect` enum recurses inside Swift itself, so a tree
+    /// hundreds of thousands of levels deep is still not survivable; the cap
+    /// keeps this library's own recursion bounded and the error clear.)
+    @Test func deeplyNestedQueryTreeThrows() throws {
+        let index = try corpus()
+        func tree(_ depth: Int) -> Query {
+            var q: Query = .term("title", "dune")
+            for _ in 0..<depth { q = q.excluding(.term("title", "zzz")) }
+            return q
+        }
+        #expect(try index.search(tree(Query.maxNesting)).count == 1)
+        let error = #expect(throws: TantivyError.self) { try index.search(tree(Query.maxNesting + 1)) }
+        #expect(error?.isEncoding == true)
+        #expect(throws: TantivyError.self) { try index.search(tree(1_000)) }
+    }
+
+    /// `&&` / `||` chains used to nest a boolean per operator, so a few dozen
+    /// terms hit the engine's JSON recursion limit (and now the nesting cap).
+    /// They flatten into one clause list instead.
+    @Test func operatorChainsFlatten() throws {
+        let index = try corpus()
+        let a: Query = .term("title", "dune"), b: Query = .term("year", 1965)
+        let c: Query = .term("title", "hyperion")
+
+        if case .boolean(let must, let should, let mustNot, let minimum) = a && b && c {
+            #expect(must.count == 3 && should.isEmpty && mustNot.isEmpty && minimum == nil)
+        } else { Issue.record("&& chain is not a boolean") }
+        if case .boolean(let must, let should, _, _) = a || b || c {
+            #expect(should.count == 3 && must.isEmpty)
+        } else { Issue.record("|| chain is not a boolean") }
+
+        // Mixed operators keep their structure: `(a || b) && c` must not become
+        // `a || b || c` or `a && b && c`.
+        if case .boolean(let must, _, _, _) = (a || b) && c {
+            #expect(must.count == 2)
+            if case .boolean(_, let should, _, _) = must[0] { #expect(should.count == 2) }
+            else { Issue.record("inner || was lost") }
+        } else { Issue.record("mixed chain is not a boolean") }
+        // A `should` with a minimum is a different query; it stays nested.
+        let atLeastOne = Query.anyOf([a, c], minimumShouldMatch: 1)
+        if case .boolean(_, let should, _, _) = atLeastOne || b { #expect(should.count == 2) }
+        else { Issue.record("minimum-should-match boolean was merged") }
+        // `excluding` yields must + mustNot, which is not pure either.
+        if case .boolean(let must, _, _, _) = a.excluding(c) && b { #expect(must.count == 2) }
+        else { Issue.record("excluding was merged") }
+
+        // The point: a long chain runs, with the expected results.
+        var all: Query = .term("title", "dune")
+        var any: Query = .term("title", "nothing")
+        for _ in 0..<200 {
+            all = all && .range("year", 1900...2000)
+            any = any || .term("title", "dune")
+        }
+        #expect(try index.search(all).count == 1)
+        #expect(try index.search(any).count == 1)
+        #expect(try index.search(a || b || c).count == 2)
+    }
+
+    // MARK: - Schema and document values
+
+    /// tantivy's schema builder panics on a repeated field name, which surfaced
+    /// only as "internal panic". Now it is a named error.
+    @Test func duplicateFieldNameThrowsCleanly() throws {
+        let schema = SchemaBuilder().addTextField("title").addU64Field("title").build()
+        let error = #expect(throws: TantivyError.self) { try Index.inMemory(schema: schema) }
+        #expect(error?.message.contains("duplicate field 'title'") == true)
+    }
+
+    /// An integer wider than 64 bits used to hit `Int64(_:)`, which traps on
+    /// overflow instead of throwing.
+    @Test func outOfRangeWideIntegerThrows() throws {
+        let index = try corpus()
+        let tooBig = Int128(Int64.max) + 1
+        let error = #expect(throws: TantivyError.self) {
+            try index.add(["title": "x", "year": tooBig] as [String: Any])
+        }
+        #expect(error?.isEncoding == true)
+        #expect(throws: TantivyError.self) {
+            try index.add(["title": "x", "year": UInt128(UInt64.max) + 1] as [String: Any])
+        }
+        // In range still works.
+        try index.add(["title": "x", "year": Int128(2000)] as [String: Any])
+        #expect(try index.count(.term("year", 2000)) == 1)
+    }
 }

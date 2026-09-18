@@ -154,6 +154,56 @@ fn guard<T>(out_error: *mut *mut c_char, sentinel: T, f: impl FnOnce() -> Result
     }
 }
 
+/// Drop a boxed handle, swallowing any panic from its destructor. A panic that
+/// escapes an `extern "C"` function aborts the process, and the free functions
+/// have no `out_error` to report through.
+unsafe fn free_boxed<T>(p: *mut T) {
+    if !p.is_null() {
+        let _ = catch_unwind(AssertUnwindSafe(|| drop(Box::from_raw(p))));
+    }
+}
+
+/// Deepest parenthesised nesting a query string may have.
+///
+/// tantivy's query grammar recurses once per group with no depth limit of its
+/// own, so a string like `((((…dune…))))` a few thousand levels deep overflows
+/// the stack. That is not a panic — `catch_unwind` cannot turn it into an
+/// error — so the string is walked first and rejected past this depth.
+///
+/// The bound is far below the stack limit because the grammar backtracks:
+/// parse time doubles with every level (measured: 12 levels ≈ 2 ms, 16 ≈ 45 ms,
+/// 22 ≈ 8 s), so anything past a dozen levels is a hang before it is a crash.
+/// No hand-written query nests that deep.
+const MAX_QUERY_NESTING: usize = 12;
+
+/// Reject a query string whose group nesting would recurse too deep in the
+/// parser. Counts `(`/`)` outside backslash escapes; groups inside a quoted
+/// phrase are over-counted, which only makes the check stricter.
+fn check_query_nesting(query: &str) -> Result<(), String> {
+    let mut depth = 0usize;
+    let mut escaped = false;
+    for c in query.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '(' => {
+                depth += 1;
+                if depth > MAX_QUERY_NESTING {
+                    return Err(format!(
+                        "query nests groups more than {MAX_QUERY_NESTING} levels deep"
+                    ));
+                }
+            }
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Schema construction from a small JSON spec
 // ---------------------------------------------------------------------------
@@ -182,11 +232,17 @@ fn build_schema(spec: &str) -> Result<Schema, String> {
         .ok_or("schema JSON must contain a 'fields' array")?;
 
     let mut b = Schema::builder();
+    // tantivy's builder panics on a repeated name rather than returning an
+    // error, which the FFI guard would only report as an "internal panic".
+    let mut seen = std::collections::HashSet::new();
     for f in fields {
         let name = f
             .get("name")
             .and_then(|x| x.as_str())
             .ok_or("each field needs a string 'name'")?;
+        if !seen.insert(name) {
+            return Err(format!("duplicate field '{name}' in schema"));
+        }
         let ftype = f
             .get("type")
             .and_then(|x| x.as_str())
@@ -383,9 +439,7 @@ pub extern "C" fn tantivy_index_open_or_create(
 /// Release an index handle.
 #[no_mangle]
 pub extern "C" fn tantivy_index_free(index: *mut CIndex) {
-    if !index.is_null() {
-        unsafe { drop(Box::from_raw(index)) };
-    }
+    unsafe { free_boxed(index) };
 }
 
 /// Reload the index reader so subsequent searches observe the latest commit.
@@ -433,9 +487,7 @@ pub extern "C" fn tantivy_index_writer(
 /// to persist queued documents.
 #[no_mangle]
 pub extern "C" fn tantivy_writer_free(writer: *mut CWriter) {
-    if !writer.is_null() {
-        unsafe { drop(Box::from_raw(writer)) };
-    }
+    unsafe { free_boxed(writer) };
 }
 
 /// Add one document from a JSON object whose keys are field names — the escape
@@ -877,6 +929,7 @@ fn parse_string_query(
     default_fields_csv: Option<&str>,
     boosts_json: Option<&str>,
 ) -> Result<Box<dyn Query>, String> {
+    check_query_nesting(query)?;
     let fields: Vec<Field> = match default_fields_csv.map(str::trim).filter(|s| !s.is_empty()) {
         None => default_text_fields(&idx.schema),
         Some(csv) => {
@@ -1285,6 +1338,7 @@ fn build_query(
                 .get("query")
                 .and_then(|x| x.as_str())
                 .ok_or("parsed requires a string 'query'")?;
+            check_query_nesting(q)?;
             let fields = match node.get("fields").and_then(|x| x.as_array()) {
                 Some(arr) if !arr.is_empty() => {
                     let mut v = Vec::with_capacity(arr.len());
