@@ -485,9 +485,25 @@ pub extern "C" fn tantivy_index_writer(
 
 /// Release a writer handle. Does not commit; call `tantivy_writer_commit` first
 /// to persist queued documents.
+///
+/// Waits for any background merges the writer started before returning, rather
+/// than dropping the writer outright. Dropping an `IndexWriter` kills its
+/// merge threads, and a commit schedules merges asynchronously, so a writer
+/// freed right after its commit (the scoped-write pattern) would otherwise
+/// abandon every merge and leave one segment per commit behind.
 #[no_mangle]
 pub extern "C" fn tantivy_writer_free(writer: *mut CWriter) {
-    unsafe { free_boxed(writer) };
+    if !writer.is_null() {
+        let boxed = unsafe { Box::from_raw(writer) };
+        // A merge failure here has nowhere to be reported and does not affect
+        // committed data; the next writer's commit will retry the merge. A
+        // panic is swallowed for the same reason: one escaping this
+        // `extern "C"` function would abort the process.
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let CWriter { writer } = *boxed;
+            let _ = writer.wait_merging_threads();
+        }));
+    }
 }
 
 /// Add one document from a JSON object whose keys are field names — the escape

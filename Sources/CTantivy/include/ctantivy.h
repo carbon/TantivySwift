@@ -63,6 +63,8 @@ CWriter *tantivy_index_writer(CIndex *index,
                               size_t heap_size_bytes,
                               char **out_error);
 
+/* Release a writer. Does not commit. Blocks until background merges the
+   writer started have finished (dropping it outright would abandon them). */
 void tantivy_writer_free(CWriter *writer);
 
 /* Add one JSON document (keys = field names). 0 ok, -1 error. */
