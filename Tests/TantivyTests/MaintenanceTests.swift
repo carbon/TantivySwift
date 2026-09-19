@@ -40,6 +40,71 @@ struct MaintenanceTests {
         #expect(s.segmentCount == 3)
     }
 
+    /// Releasing a writer must wait for the merges its commit scheduled.
+    /// tantivy kills merge threads when a writer is dropped, so without the wait
+    /// the scoped helpers (writer, commit, release) abandon every merge and the
+    /// index grows one segment per call.
+    @Test func releasingWriterCompletesScheduledMerges() throws {
+        let index = try stringIdIndex()
+        let n = 40
+        for i in 0..<n { try index.add(["id": "doc-\(i)"]) }   // one writer + commit each
+        #expect(index.documentCount == n)
+        #expect(try index.stats().segmentCount < n / 2)
+    }
+
+    /// Same on a persistent (mmap) index, where an abandoned merge would also
+    /// leave its file set behind: after reopening, the documents are all there
+    /// and the segment count is small.
+    @Test func releasingWriterCompletesScheduledMergesOnDisk() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tantivy-merge-wait-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let schema = SchemaBuilder().addStringField("id", stored: true).build()
+        let n = 40
+        do {
+            let index = try Index(path: dir, schema: schema)
+            for i in 0..<n { try index.add(["id": "doc-\(i)"]) }
+        }
+        let reopened = try Index(path: dir, schema: schema)
+        #expect(reopened.documentCount == n)
+        #expect(try reopened.stats().segmentCount < n / 2)
+        for i in stride(from: 0, to: n, by: 7) {
+            #expect(try reopened.get("id", equals: "doc-\(i)") != nil)
+        }
+    }
+
+    /// An upsert loop through the helper (delete + add + commit per call) used
+    /// to accumulate a tombstoned segment per call; with merges completing, the
+    /// index converges to the one live document.
+    @Test func helperUpsertLoopStaysCompact() throws {
+        let index = try stringIdIndex()
+        let n = 40
+        for i in 0..<n {
+            try index.upsert(["id": "same"], idField: "id", id: "same")
+            try index.add(["id": "filler-\(i)"])          // keeps segments non-empty
+        }
+        let s = try index.stats()
+        #expect(s.documentCount == n + 1)
+        #expect(s.segmentCount < n / 2)
+        #expect(s.deletedCount < n)                        // merges expunged most tombstones
+        #expect(try index.get("id", equals: "same") != nil)
+    }
+
+    /// A writer released with uncommitted operations must neither hang on the
+    /// merge wait nor publish anything.
+    @Test func releasingUncommittedWriterIsCleanAndFast() throws {
+        let index = try stringIdIndex()
+        try index.add(["id": "committed"])
+        do {
+            let writer = try index.writer()
+            for i in 0..<200 { try writer.addDocument(["id": "pending-\(i)"]) }
+        }
+        try index.reload()
+        #expect(index.documentCount == 1)
+        try index.add(["id": "after"])                     // lock was released
+        #expect(index.documentCount == 2)
+    }
+
     @Test func statsTrackDeletedDocs() throws {
         let index = try stringIdIndex()
         try index.add(contentsOf: [["id": "a"], ["id": "b"], ["id": "c"]])

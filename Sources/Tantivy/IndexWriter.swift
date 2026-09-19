@@ -6,6 +6,18 @@ import CTantivy
 /// There must be at most one writer per index at a time. Documents become
 /// searchable only after `commit()` followed by `Index.reload()` (or a single
 /// call to `commitAndReload()`).
+///
+/// Creating a writer spawns the indexing threads, and every commit writes a
+/// segment (with an fsync on disk); the commit is the expensive part. The
+/// `heapSize` budget is not allocated up front: the indexing arena grows with
+/// uncommitted documents and is released when a segment flushes. Keep one writer
+/// alive across many documents and commit in batches; a writer per document,
+/// or a commit per document, is orders of magnitude slower than either.
+///
+/// Releasing the writer waits for any background merges it started, so a
+/// writer dropped right after `commit()` still leaves a compact index. That
+/// wait is short for the small segments a batch produces; it is long only if a
+/// large merge happens to be in flight.
 public final class IndexWriter {
     /// `CWriter *`
     private let handle: OpaquePointer
@@ -18,6 +30,8 @@ public final class IndexWriter {
         self.index = index
     }
 
+    /// Uncommitted operations are discarded. Blocks until background merges the
+    /// writer started have finished (see the type documentation).
     deinit { tantivy_writer_free(handle) }
 
     /// Add a document from a dictionary of `field name → value`.

@@ -14,6 +14,15 @@ extension Index {
     ///
     /// Use one `write` block per batch — do not nest (a second writer would be
     /// rejected by the single-writer lock).
+    ///
+    /// > Cost: each call opens a writer (spawning its indexing threads), commits
+    /// > (a segment write and, on disk, an fsync) and reloads the reader. That is
+    /// > fine per batch and very slow per document: calling it in a loop is
+    /// > roughly two orders of magnitude slower than one block that adds all
+    /// > the documents. The single-document helpers below are built on it, so
+    /// > the same applies to them. Batch with `add(contentsOf:)` or one `write`
+    /// > block, or keep a long-lived ``writer(heapSize:)`` and commit when it
+    /// > suits you.
     @discardableResult
     public func write<R>(heapSize: Int = 0, _ body: (IndexWriter) throws -> R) throws -> R {
         let writer = try self.writer(heapSize: heapSize)
@@ -24,6 +33,10 @@ extension Index {
     }
 
     /// Add a single document (field name → value) and make it searchable.
+    ///
+    /// One writer, commit and reload per call — see ``write(heapSize:_:)``.
+    /// Do not call it in a loop; use `add(contentsOf:)` or a long-lived
+    /// ``writer(heapSize:)`` instead.
     public func add(_ document: [String: Any]) throws {
         try write { try $0.addDocument(document) }
     }
@@ -34,6 +47,10 @@ extension Index {
     }
 
     /// Add a single `Encodable` document and make it searchable.
+    ///
+    /// One writer, commit and reload per call — see ``write(heapSize:_:)``.
+    /// Do not call it in a loop; use `add(contentsOf:)` or a long-lived
+    /// ``writer(heapSize:)`` instead.
     public func add<T: Encodable>(_ value: T) throws {
         try write { try $0.addDocument(value) }
     }
@@ -63,6 +80,10 @@ extension Index {
     /// in a single commit. tantivy has no in-place update, so this is the
     /// delete-by-term + add pattern. The id field should be a single-token field
     /// (a `string`/raw or numeric/bool field).
+    ///
+    /// One writer, commit and reload per call — see ``write(heapSize:_:)``. To
+    /// upsert many documents, do the delete + add pairs inside one `write`
+    /// block or on a long-lived ``writer(heapSize:)``.
     public func upsert(_ document: [String: Any], idField: String, id: String) throws {
         try write { w in
             try w.deleteDocuments(field: idField, equals: id)
@@ -72,6 +93,10 @@ extension Index {
 
     /// Replace any documents whose `idField` equals `id`, then add the
     /// `Encodable` value, in a single commit.
+    ///
+    /// One writer, commit and reload per call — see ``write(heapSize:_:)``. To
+    /// upsert many documents, do the delete + add pairs inside one `write`
+    /// block or on a long-lived ``writer(heapSize:)``.
     public func upsert<T: Encodable>(_ value: T, idField: String, id: String) throws {
         try write { w in
             try w.deleteDocuments(field: idField, equals: id)
@@ -81,6 +106,8 @@ extension Index {
 
     /// Delete all documents matching `query`, then commit + reload so the change
     /// is immediately searchable. See `IndexWriter.deleteDocuments(matching:)`.
+    ///
+    /// One writer, commit and reload per call — see ``write(heapSize:_:)``.
     public func delete(matching query: Query) throws {
         try write { try $0.deleteDocuments(matching: query) }
     }

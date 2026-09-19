@@ -226,6 +226,12 @@ Use at most **one writer per index at a time**. Values may be scalars or arrays
 (arrays populate multi-valued fields). Documents become searchable only after a
 `commit()` followed by `Index.reload()` — `commitAndReload()` does both.
 
+**Batch your writes.** Creating a writer spawns the indexing threads, and every
+commit writes a segment and (on disk) fsyncs; the commit is the expensive part. Keep one writer alive across many documents and commit once per batch:
+a writer-plus-commit per document is roughly two orders of magnitude slower
+than one commit covering the same documents. Releasing a writer waits for the
+background merges it started, so even small commits leave a compact index.
+
 **Replace / upsert.** tantivy has no in-place update; replace a document by
 deleting its id term and re-adding it (supply the *whole* document). `upsert`
 does both in one commit:
@@ -481,6 +487,12 @@ try index.add(contentsOf: [book1, book2])    // one commit
 let books = try index.search("dune", as: Book.self)   // [Book]
 ```
 
+Every helper that writes — `write`, `add`, `upsert`, `delete(matching:)` — opens
+a writer, commits and reloads. That is one round of thread start-up, segment
+write and fsync per *call*, so use them per batch, never per document in a
+loop: prefer `add(contentsOf:)`, one `write` block, or a long-lived
+`index.writer()` you commit when it suits you.
+
 Typed search uses a model-driven decoder: a scalar property reads a field's
 first stored value, an array property reads them all (a one-element multi-valued
 field still decodes into an array), and optionals become `nil` for absent
@@ -508,8 +520,20 @@ let scored  = try books.searchScored("dune") // [(score: Float, model: Book)]
 try books.removeAll()
 ```
 
+`add`, `upsert` and `remove` each commit (see above), so when models arrive
+one at a time keep a long-lived typed writer and commit per batch:
+
+```swift
+let writer = try books.writer()              // holds the single-writer lock
+for book in incoming { try writer.add(book) }
+try writer.upsert(book, idField: "id", id: book.id)
+try writer.remove(idField: "id", id: staleId)
+try writer.commit()                          // durable + searchable; or rollback()
+```
+
 The schema's field names must match the model's coding keys. `books.index`
-exposes the underlying `Index` for anything the façade doesn't cover.
+exposes the underlying `Index` for anything the façade doesn't cover, and
+`writer.indexWriter` the underlying `IndexWriter`.
 
 ## Building the XCFramework
 

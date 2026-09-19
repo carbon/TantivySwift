@@ -431,10 +431,19 @@ pub extern "C" fn tantivy_index_writer(
 
 /// Release a writer handle. Does not commit; call `tantivy_writer_commit` first
 /// to persist queued documents.
+///
+/// Waits for any background merges the writer started before returning, rather
+/// than dropping the writer outright. Dropping an `IndexWriter` kills its
+/// merge threads, and a commit schedules merges asynchronously, so a writer
+/// freed right after its commit (the scoped-write pattern) would otherwise
+/// abandon every merge and leave one segment per commit behind.
 #[no_mangle]
 pub extern "C" fn tantivy_writer_free(writer: *mut CWriter) {
     if !writer.is_null() {
-        unsafe { drop(Box::from_raw(writer)) };
+        let CWriter { writer } = *unsafe { Box::from_raw(writer) };
+        // A merge failure here has nowhere to be reported and does not affect
+        // committed data; the next writer's commit will retry the merge.
+        let _ = writer.wait_merging_threads();
     }
 }
 
