@@ -206,8 +206,18 @@ extension MessagePackWriter {
                 throw TantivyError.encoding("field '\(field)' has a non-finite number (NaN/±∞)")
             }
             write(Double(v))
-        case let v as any SignedInteger: write(Int64(v))
-        case let v as any UnsignedInteger: write(UInt64(v))
+        // Wider types (`Int128`) may not fit; `Int64(v)` would trap rather
+        // than throw, so convert exactly and report the overflow.
+        case let v as any SignedInteger:
+            guard let i = Int64(exactly: v) else {
+                throw TantivyError.encoding("field '\(field)' has an integer outside the Int64 range")
+            }
+            write(i)
+        case let v as any UnsignedInteger:
+            guard let u = UInt64(exactly: v) else {
+                throw TantivyError.encoding("field '\(field)' has an integer outside the UInt64 range")
+            }
+            write(u)
         case let v as NSNumber:
             // Reached only for values bridged from Objective-C that none of the
             // concrete cases above matched.
@@ -241,6 +251,13 @@ struct MessagePackReader {
     }
 
     var isAtEnd: Bool { index >= buffer.count }
+
+    /// A safe pre-allocation for a header claiming `count` elements: every
+    /// element takes at least one byte, so a corrupt header cannot make the
+    /// reader reserve more than the buffer could possibly hold.
+    private func plausibleCount(_ count: Int) -> Int {
+        max(0, min(count, buffer.count - index))
+    }
 
     // MARK: - Primitive reads
 
@@ -412,7 +429,7 @@ extension MessagePackReader {
             let key = try reader.readString()
             guard key == "hits" else { throw MessagePackError.unexpectedKey(key) }
             let count = try reader.readArrayHeader()
-            hits.reserveCapacity(count)
+            hits.reserveCapacity(reader.plausibleCount(count))
             for _ in 0..<count {
                 hits.append(try reader.readHit())
             }
@@ -431,12 +448,12 @@ extension MessagePackReader {
                 score = Float(try readDouble())
             case "doc":
                 let fieldCount = try readMapHeader()
-                fields.reserveCapacity(fieldCount)
+                fields.reserveCapacity(plausibleCount(fieldCount))
                 for _ in 0..<fieldCount {
                     let name = try readString()
                     let valueCount = try readArrayHeader()
                     var values: [FieldValue] = []
-                    values.reserveCapacity(valueCount)
+                    values.reserveCapacity(plausibleCount(valueCount))
                     for _ in 0..<valueCount {
                         values.append(try readFieldValue())
                     }
