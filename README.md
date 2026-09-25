@@ -8,6 +8,10 @@ Works on **macOS, iOS and iPadOS** (device + simulator). The Rust engine ships a
 a prebuilt static-library `XCFramework`, downloaded from the GitHub Release and
 checksum-verified by SwiftPM; there is nothing to compile at app-build time.
 
+The same engine also builds as **WebAssembly**, with a TypeScript package in
+[`js/`](js/README.md) that mirrors this API — in-memory and single-threaded, for
+browsers, workers and Node. See [WebAssembly](#webassembly).
+
 ```swift
 import Tantivy
 
@@ -588,6 +592,43 @@ swift test
 with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` so XCTest is
 found.)
 
+To run the suite against the single-threaded writer the WebAssembly build uses,
+build the host library with it (CI runs both):
+
+```bash
+scripts/build-host.sh --features single-threaded
+swift test
+```
+
+## WebAssembly
+
+`scripts/build-wasm.sh` compiles the same Rust library for `wasm32-wasip1`, and
+[`js/`](js/README.md) wraps it in a TypeScript package with this package's API:
+
+```bash
+rustup target add wasm32-wasip1
+cd js && npm install && npm run build && npm test
+```
+
+Two things differ from the Swift build, both because WebAssembly has no threads
+or filesystem:
+
+- **In memory only.** `Index(path:)` has no counterpart; indexes are created
+  with `Index.inMemory`.
+- **A single-threaded writer.** tantivy's `IndexWriter` indexes, merges and
+  compresses on threads of its own. The `single-threaded` Cargo feature swaps in
+  `rust/src/single_threaded.rs`, which does all of it on the calling thread from
+  tantivy's public pieces (`SegmentWriter`, `merge_filtered_segments`, …), with
+  the same opstamps, delete ordering and merge policy. Merges run in line at
+  commit instead of in the background. The Swift build keeps tantivy's own
+  writer; the feature is off unless asked for.
+
+The JavaScript side calls the same C ABI Swift does: the module exports
+`tantivy_index_search`, `tantivy_writer_commit` and the rest, plus an allocator
+for passing buffers in. Its eight WASI imports (randomness, clocks, stderr) are
+shimmed in a few lines, so the package has no runtime dependencies and needs no
+cross-origin-isolation headers. The module is ~5 MB, ~1.6 MB gzipped.
+
 ## How it works
 
 ```
@@ -598,6 +639,9 @@ C ABI  rust/src/lib.rs         — #[no_mangle] extern "C" shim, MessagePack + J
   ▼
 Rust   tantivy =0.26.1         — the search engine, pinned from crates.io
 ```
+
+The TypeScript package in `js/` sits where `Sources/Tantivy` does, over the
+same C ABI compiled to WebAssembly.
 
 The boundary uses two encodings, chosen per path by what each actually costs:
 

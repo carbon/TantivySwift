@@ -18,3 +18,7 @@ DerivedData/
 
 .DS_Store
 /artifacts.bak
+
+# JavaScript package: dependencies and build output (tsc + scripts/build-wasm.sh)
+js/node_modules/
+js/dist/

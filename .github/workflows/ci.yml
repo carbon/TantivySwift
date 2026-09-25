@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   test:
-    name: Build & test (host mode)
+    name: Build & test (host mode, ${{ matrix.writer }} writer)
     # Package.swift requires Swift 6.4, which ships with Xcode 27. GitHub's
     # macos-26 image only carries Xcode 26.x; Xcode 27 lives on its own
     # (preview) image, selected with the `xcode-27` label. That image ships a
@@ -22,6 +22,12 @@ jobs:
     # image this can move back to `macos-26` plus a setup-xcode step.
     # See https://github.com/actions/runner-images/issues/14404
     runs-on: xcode-27
+    strategy:
+      fail-fast: false
+      matrix:
+        # `threaded` is what ships. `single-threaded` runs the same suite
+        # against the writer the WebAssembly build uses (rust/src/single_threaded.rs).
+        writer: [threaded, single-threaded]
 
     steps:
       # No LFS checkout on purpose: CI builds the Rust engine from source and
@@ -48,7 +54,34 @@ jobs:
         run: rm -rf artifacts/CTantivy.xcframework
 
       - name: Build Rust FFI (host)
-        run: scripts/build-host.sh
+        run: scripts/build-host.sh ${{ matrix.writer == 'single-threaded' && '--features single-threaded' || '' }}
 
       - name: Run tests
         run: swift test
+
+  wasm:
+    name: WebAssembly build & JavaScript tests
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: js
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add the WebAssembly target
+        run: rustup target add wasm32-wasip1
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test

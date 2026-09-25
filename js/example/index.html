@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tantivy in the browser</title>
+    <style>
+      body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+      input { width: 100%; font: inherit; padding: 0.5rem; box-sizing: border-box; }
+      li b { background: #ff05; }
+      #status { color: #666; font-size: 0.875rem; }
+    </style>
+  </head>
+  <body>
+    <h1>tantivy in the browser</h1>
+    <p id="status">Loading…</p>
+    <input id="q" placeholder="Search (tantivy query syntax), e.g. sea OR whale" autofocus />
+    <ol id="hits"></ol>
+    <script type="module">
+      // Serve the js/ directory (so ../dist/ resolves) and open /example/.
+      import { init, Index, SchemaBuilder, version } from "../dist/index.js";
+
+      const books = [
+        ["The Old Man and the Sea", "An old man fishes alone in a skiff in the Gulf Stream.", 1952],
+        ["Moby-Dick", "Captain Ahab hunts the white whale across the sea.", 1851],
+        ["Dune", "A desert planet, a noble family, and the spice that holds the universe together.", 1965],
+        ["Neuromancer", "The sky above the port was the color of television.", 1984],
+        ["Twenty Thousand Leagues Under the Seas", "Captain Nemo and the submarine Nautilus.", 1870],
+      ];
+
+      const started = performance.now();
+      await init();
+      const index = Index.inMemory(
+        new SchemaBuilder()
+          .addTextField("title", { stored: true })
+          .addTextField("body", { stored: true })
+          .addU64Field("year", { stored: true, fast: true })
+          .build(),
+      );
+      index.addAll(books.map(([title, body, year]) => ({ title, body, year })));
+      document.getElementById("status").textContent =
+        `${version()} — ${index.documentCount} books indexed in ${Math.round(performance.now() - started)} ms`;
+
+      const hits = document.getElementById("hits");
+      const input = document.getElementById("q");
+      input.addEventListener("input", () => {
+        hits.replaceChildren();
+        if (!input.value.trim()) return;
+        let results;
+        try {
+          results = index.search(input.value, { highlight: ["body"], limit: 10 });
+        } catch (error) {
+          hits.textContent = error.message;
+          return;
+        }
+        for (const hit of results) {
+          const li = document.createElement("li");
+          li.innerHTML = `<strong></strong> (${hit.int("year")}) — ${hit.snippet("body") || ""}`;
+          li.querySelector("strong").textContent = hit.string("title");
+          hits.append(li);
+        }
+      });
+    </script>
+  </body>
+</html>
