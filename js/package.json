@@ -1,0 +1,33 @@
+{
+  "name": "@carbon/tantivy",
+  "version": "0.9.0",
+  "description": "tantivy 0.26.1 full-text search in WebAssembly: in-memory, single-threaded, with the TantivySwift API",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./tantivy.wasm": "./dist/tantivy.wasm"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:wasm": "../scripts/build-wasm.sh",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:wasm && npm run build:ts",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}

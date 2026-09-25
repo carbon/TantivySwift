@@ -25,6 +25,10 @@
 mod keep_stem;
 mod msgpack;
 mod multi_phrase;
+#[cfg(feature = "single-threaded")]
+mod single_threaded;
+#[cfg(target_family = "wasm")]
+mod wasm;
 
 use std::ffi::{c_char, CStr, CString};
 use std::os::raw::c_int;
@@ -37,6 +41,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde_json::json;
 use tantivy::collector::{Count, TopDocs};
+#[cfg(feature = "native")]
 use tantivy::directory::MmapDirectory;
 use tantivy::aggregation::agg_req::Aggregations;
 use tantivy::aggregation::AggregationCollector;
@@ -54,7 +59,7 @@ use tantivy::snippet::SnippetGenerator;
 use tantivy::tokenizer::{
     LowerCaser, RawTokenizer, RemoveLongFilter, SimpleTokenizer, TextAnalyzer, TokenStream,
 };
-use tantivy::{DateTime, Index, IndexReader, IndexWriter, Order, ReloadPolicy};
+use tantivy::{DateTime, Index, IndexReader, Order, ReloadPolicy};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -68,11 +73,23 @@ pub struct CIndex {
     index: Index,
     reader: IndexReader,
     schema: Schema,
+    /// Reload `reader` after each commit. tantivy's `OnCommitWithDelay` does
+    /// that from a watcher thread; the single-threaded writer does it in line.
+    #[cfg_attr(not(feature = "single-threaded"), allow(dead_code))]
+    reload_on_commit: bool,
 }
+
+/// The writer behind a `CWriter`: tantivy's own, or the single-threaded one
+/// that WebAssembly needs (see `single_threaded.rs`). Both are driven through
+/// the same calls below; the few that differ go through `writer_*` helpers.
+#[cfg(not(feature = "single-threaded"))]
+type Writer = tantivy::IndexWriter;
+#[cfg(feature = "single-threaded")]
+type Writer = single_threaded::SingleThreadedWriter;
 
 /// Backing object for a Swift `IndexWriter`.
 pub struct CWriter {
-    writer: IndexWriter,
+    writer: Writer,
 }
 
 // ---------------------------------------------------------------------------
@@ -403,20 +420,19 @@ pub extern "C" fn tantivy_index_open_or_create(
 
         let path = unsafe { opt_str(path) }.filter(|s| !s.is_empty());
         let index = match path {
-            None => Index::create_in_ram(schema.clone()),
-            Some(dir) => {
-                std::fs::create_dir_all(dir)
-                    .map_err(|e| format!("could not create directory '{dir}': {e}"))?;
-                let mmap = MmapDirectory::open(dir)
-                    .map_err(|e| format!("could not open directory '{dir}': {e}"))?;
-                Index::open_or_create(mmap, schema.clone())
-                    .map_err(|e| format!("open_or_create failed: {e}"))?
-            }
+            None => Index::builder()
+                .schema(schema.clone())
+                .settings(index_settings())
+                .create_in_ram()
+                .map_err(|e| format!("create failed: {e}"))?,
+            Some(dir) => open_on_disk(dir, &schema)?,
         };
 
         register_analyzers(&index);
 
-        let policy = if reload_on_commit != 0 {
+        // The single-threaded writer reloads the reader itself; the watcher
+        // behind `OnCommitWithDelay` would need a thread.
+        let policy = if reload_on_commit != 0 && cfg!(not(feature = "single-threaded")) {
             ReloadPolicy::OnCommitWithDelay
         } else {
             ReloadPolicy::Manual
@@ -431,9 +447,37 @@ pub extern "C" fn tantivy_index_open_or_create(
             index,
             reader,
             schema,
+            reload_on_commit: reload_on_commit != 0,
         });
         Ok(Box::into_raw(boxed))
     })
+}
+
+/// Settings for a newly created index. The single-threaded writer needs the
+/// doc store compressed in line rather than on a thread of its own.
+fn index_settings() -> tantivy::IndexSettings {
+    #[cfg(feature = "single-threaded")]
+    return single_threaded::settings();
+    #[cfg(not(feature = "single-threaded"))]
+    return tantivy::IndexSettings::default();
+}
+
+#[cfg(feature = "native")]
+fn open_on_disk(dir: &str, schema: &Schema) -> Result<Index, String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("could not create directory '{dir}': {e}"))?;
+    let mmap = MmapDirectory::open(dir)
+        .map_err(|e| format!("could not open directory '{dir}': {e}"))?;
+    Index::builder()
+        .schema(schema.clone())
+        .settings(index_settings())
+        .open_or_create(mmap)
+        .map_err(|e| format!("open_or_create failed: {e}"))
+}
+
+#[cfg(not(feature = "native"))]
+fn open_on_disk(_dir: &str, _schema: &Schema) -> Result<Index, String> {
+    Err("this build keeps indexes in memory only; open one without a path".to_string())
 }
 
 /// Release an index handle.
@@ -475,12 +519,20 @@ pub extern "C" fn tantivy_index_writer(
         } else {
             heap_size_bytes
         };
-        let writer: IndexWriter = idx
-            .index
-            .writer(heap)
-            .map_err(|e| format!("could not create writer: {e}"))?;
+        let writer = writer_open(idx, heap).map_err(|e| format!("could not create writer: {e}"))?;
         Ok(Box::into_raw(Box::new(CWriter { writer })))
     })
+}
+
+#[cfg(not(feature = "single-threaded"))]
+fn writer_open(idx: &CIndex, heap: usize) -> tantivy::Result<Writer> {
+    idx.index.writer(heap)
+}
+
+#[cfg(feature = "single-threaded")]
+fn writer_open(idx: &CIndex, heap: usize) -> tantivy::Result<Writer> {
+    let reader = idx.reload_on_commit.then(|| idx.reader.clone());
+    single_threaded::SingleThreadedWriter::new(&idx.index, heap, reader)
 }
 
 /// Release a writer handle. Does not commit; call `tantivy_writer_commit` first
@@ -501,7 +553,12 @@ pub extern "C" fn tantivy_writer_free(writer: *mut CWriter) {
         // `extern "C"` function would abort the process.
         let _ = catch_unwind(AssertUnwindSafe(|| {
             let CWriter { writer } = *boxed;
+            #[cfg(not(feature = "single-threaded"))]
             let _ = writer.wait_merging_threads();
+            // Merges ran in line, at commit; dropping frees what was not
+            // committed.
+            #[cfg(feature = "single-threaded")]
+            drop(writer);
         }));
     }
 }
@@ -516,7 +573,7 @@ pub extern "C" fn tantivy_writer_add_json(
     out_error: *mut *mut c_char,
 ) -> c_int {
     guard(out_error, -1, || {
-        let w = unsafe { writer.as_ref() }.ok_or("writer handle is null")?;
+        let w = unsafe { writer.as_mut() }.ok_or("writer handle is null")?;
         let json = unsafe { opt_str(doc_json) }.ok_or("doc_json must be valid UTF-8")?;
         let schema = w.writer.index().schema();
         let doc = TantivyDocument::parse_json(&schema, json)
@@ -544,7 +601,7 @@ pub extern "C" fn tantivy_writer_add_msgpack(
     out_error: *mut *mut c_char,
 ) -> c_int {
     guard(out_error, -1, || {
-        let w = unsafe { writer.as_ref() }.ok_or("writer handle is null")?;
+        let w = unsafe { writer.as_mut() }.ok_or("writer handle is null")?;
         let bytes: &[u8] = match (payload.is_null(), len) {
             (_, 0) => &[],
             (true, _) => return Err("payload is null but its length is non-zero".to_string()),
@@ -632,7 +689,7 @@ pub extern "C" fn tantivy_writer_delete_all(
     out_error: *mut *mut c_char,
 ) -> c_int {
     guard(out_error, -1, || {
-        let w = unsafe { writer.as_ref() }.ok_or("writer handle is null")?;
+        let w = unsafe { writer.as_mut() }.ok_or("writer handle is null")?;
         w.writer
             .delete_all_documents()
             .map_err(|e| format!("delete_all failed: {e}"))?;
@@ -655,7 +712,7 @@ pub extern "C" fn tantivy_writer_delete_term(
     out_error: *mut *mut c_char,
 ) -> c_int {
     guard(out_error, -1, || {
-        let w = unsafe { writer.as_ref() }.ok_or("writer handle is null")?;
+        let w = unsafe { writer.as_mut() }.ok_or("writer handle is null")?;
         let field_name = unsafe { opt_str(field) }.ok_or("field must be valid UTF-8")?;
         let value_str = unsafe { opt_str(value_json) }.ok_or("value_json must be valid UTF-8")?;
         let value: serde_json::Value =
@@ -729,7 +786,7 @@ pub extern "C" fn tantivy_writer_delete_term_bytes(
     out_error: *mut *mut c_char,
 ) -> c_int {
     guard(out_error, -1, || {
-        let w = unsafe { writer.as_ref() }.ok_or("writer handle is null")?;
+        let w = unsafe { writer.as_mut() }.ok_or("writer handle is null")?;
         let field_name = unsafe { opt_str(field) }.ok_or("field must be valid UTF-8")?;
         let bytes: &[u8] = match (value.is_null(), len) {
             (_, 0) => &[],
@@ -764,13 +821,13 @@ pub extern "C" fn tantivy_writer_delete_query(
     out_error: *mut *mut c_char,
 ) -> c_int {
     guard(out_error, -1, || {
-        let w = unsafe { writer.as_ref() }.ok_or("writer handle is null")?;
+        let w = unsafe { writer.as_mut() }.ok_or("writer handle is null")?;
         let qjson = unsafe { opt_str(query_json) }.ok_or("query_json must be valid UTF-8")?;
         let tree: serde_json::Value =
             serde_json::from_str(qjson).map_err(|e| format!("invalid query JSON: {e}"))?;
-        let index = w.writer.index();
+        let index = w.writer.index().clone();
         let schema = index.schema();
-        let query = build_query(index, &schema, &tree)?;
+        let query = build_query(&index, &schema, &tree)?;
         w.writer
             .delete_query(query)
             .map_err(|e| format!("delete_query failed: {e}"))?;
@@ -791,25 +848,36 @@ pub extern "C" fn tantivy_writer_delete_query(
 pub extern "C" fn tantivy_writer_merge(writer: *mut CWriter, out_error: *mut *mut c_char) -> c_int {
     guard(out_error, -1, || {
         let w = unsafe { writer.as_mut() }.ok_or("writer handle is null")?;
-        let segments = w
-            .writer
-            .index()
-            .searchable_segments()
-            .map_err(|e| format!("could not list segments: {e}"))?;
-        // Merge when there's something to gain: several segments to combine, or a
-        // single segment still carrying deleted documents to expunge (merging it
-        // rewrites the segment without them). Skip the no-op cases.
-        let has_deletes = segments.iter().any(|s| s.meta().num_deleted_docs() > 0);
-        if segments.len() < 2 && !has_deletes {
-            return Ok(0);
-        }
-        let segment_ids: Vec<_> = segments.iter().map(|s| s.id()).collect();
-        w.writer
-            .merge(&segment_ids)
-            .wait()
-            .map_err(|e| format!("merge failed: {e}"))?;
+        writer_merge_all(&mut w.writer)?;
         Ok(0)
     })
+}
+
+#[cfg(not(feature = "single-threaded"))]
+fn writer_merge_all(writer: &mut Writer) -> Result<(), String> {
+    let segments = writer
+        .index()
+        .searchable_segments()
+        .map_err(|e| format!("could not list segments: {e}"))?;
+    // Merge when there's something to gain: several segments to combine, or a
+    // single segment still carrying deleted documents to expunge (merging it
+    // rewrites the segment without them). Skip the no-op cases.
+    let has_deletes = segments.iter().any(|s| s.meta().num_deleted_docs() > 0);
+    if segments.len() < 2 && !has_deletes {
+        return Ok(());
+    }
+    let segment_ids: Vec<_> = segments.iter().map(|s| s.id()).collect();
+    writer
+        .merge(&segment_ids)
+        .wait()
+        .map_err(|e| format!("merge failed: {e}"))?;
+    Ok(())
+}
+
+#[cfg(feature = "single-threaded")]
+fn writer_merge_all(writer: &mut Writer) -> Result<(), String> {
+    // Same no-op rules as above, applied by the writer to its own view.
+    writer.merge_all().map_err(|e| format!("merge failed: {e}"))
 }
 
 /// Delete segment files the index no longer references (e.g. left behind by
@@ -821,11 +889,12 @@ pub extern "C" fn tantivy_writer_garbage_collect(
     out_error: *mut *mut c_char,
 ) -> c_int {
     guard(out_error, -1, || {
-        let w = unsafe { writer.as_ref() }.ok_or("writer handle is null")?;
-        w.writer
-            .garbage_collect_files()
-            .wait()
-            .map_err(|e| format!("garbage collect failed: {e}"))?;
+        let w = unsafe { writer.as_mut() }.ok_or("writer handle is null")?;
+        #[cfg(not(feature = "single-threaded"))]
+        let collected = w.writer.garbage_collect_files().wait().map(drop);
+        #[cfg(feature = "single-threaded")]
+        let collected = w.writer.garbage_collect_files();
+        collected.map_err(|e| format!("garbage collect failed: {e}"))?;
         Ok(0)
     })
 }

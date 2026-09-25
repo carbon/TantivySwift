@@ -6,12 +6,35 @@ publish = false
 
 [lib]
 name = "tantivy_ffi"
-# staticlib: a self-contained .a we link straight into the Swift binary.
+# staticlib: a self-contained .a we link straight into the Swift binary. The
+# WebAssembly build overrides this with `cargo rustc --crate-type cdylib` (see
+# scripts/build-wasm.sh), so the same C ABI is what JavaScript calls.
 crate-type = ["staticlib"]
 
+[features]
+default = ["native"]
+# On-disk indexes (memory-mapped) and zstd-compressed columns — the Apple
+# build. Off for WebAssembly: there is no filesystem to map, and zstd is C that
+# would need a WASI C toolchain to compile.
+native = ["tantivy/mmap", "tantivy/columnar-zstd-compression"]
+# Replace tantivy's `IndexWriter`, which spawns indexing, merging and
+# compression threads, with a writer that does all of that on the calling
+# thread (src/single_threaded.rs). Required on WebAssembly without threads;
+# also buildable natively, so the Swift test suite can exercise it.
+single-threaded = []
+
 [dependencies]
-# Pinned to the exact tantivy 0.26.1 release from crates.io.
-tantivy = "=0.26.1"
+# Pinned to the exact tantivy 0.26.1 release from crates.io. Default features
+# are spelled out so `native` can gate the two that WebAssembly cannot use.
+tantivy = { version = "=0.26.1", default-features = false, features = [
+    "stopwords",
+    "lz4-compression",
+    "stemmer",
+] }
+# `BitSet`, for writing delete files in the single-threaded writer. tantivy
+# takes one in `write_alive_bitset` but does not re-export the type. Pinned to
+# tantivy's exact copy so the two are the same type.
+tantivy-common = "=0.11.0"
 serde_json = "1"
 # Byte values in a *query* tree are base64 (queries are JSON; documents and hits
 # are MessagePack and carry bytes natively). Already in the tree via tantivy.

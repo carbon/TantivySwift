@@ -6,6 +6,9 @@
 # directly against rust/target/release/libtantivy_ffi.a so you can run
 # `swift build` / `swift test` locally. For a redistributable, multi-platform
 # package, run build-xcframework.sh instead.
+#
+# Extra arguments go to cargo, e.g. `--features single-threaded` to link the
+# writer the WebAssembly build uses and run the Swift tests against it.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -14,6 +17,6 @@ cd "$(dirname "$0")/.."
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
 
 echo "==> Building libtantivy_ffi.a for the host ($(uname -m))"
-( cd rust && cargo build --release )
+( cd rust && cargo build --release "$@" )
 
 echo "==> Done: rust/target/release/libtantivy_ffi.a"

@@ -1018,6 +1018,7 @@ dependencies = [
  "rust-stemmers",
  "serde_json",
  "tantivy",
+ "tantivy-common",
  "time",
 ]
 
